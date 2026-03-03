@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
 /* USER CODE END Includes */
 
@@ -455,20 +456,76 @@ int main(void)
 
     if (r >= 1 && tokens[0].type == JSMN_OBJECT) {
       for (int i = 1; i < r; i++) {
-        // Check if this is a string token and equals "TEC_TRIP"
-        if (tokens[i].type == JSMN_STRING &&
-            strncmp(json_str + tokens[i].start, "TEC_TRIP", 8) == 0 &&
-            tokens[i].end - tokens[i].start == 9) {
-          // Next token should be the value
-          i++;
-          if (i < r && tokens[i].type == JSMN_PRIMITIVE) {
-            int TEC_TRIP = strtoul(json_str + tokens[i].start, NULL, 10);
-            printf("TEC_TRIP found: %d\r\n", TEC_TRIP);
-            // Add your logic here based on the TEC_TRIP value
-            double r_th = temperature_to_resistance((double)TEC_TRIP);
-            TEC_TRIP_VALUE = solve_v(r_th);
-            printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, TEC_TRIP_VALUE);
-          }
+        if (tokens[i].type != JSMN_STRING) {
+          continue;
+        }
+
+        int key_start = tokens[i].start;
+        int key_len = tokens[i].end - tokens[i].start;
+
+        // Advance to the value token
+        i++;
+        if (i >= r) {
+          break;
+        }
+
+        // Helper to copy primitive text into a NUL-terminated buffer
+        if (tokens[i].type != JSMN_PRIMITIVE) {
+          continue;
+        }
+
+        int val_start = tokens[i].start;
+        int val_len = tokens[i].end - tokens[i].start;
+        char tmpval[64];
+        int copy_len = (val_len < (int)sizeof(tmpval) - 1) ? val_len : (int)sizeof(tmpval) - 1;
+        memcpy(tmpval, json_str + val_start, copy_len);
+        tmpval[copy_len] = '\0';
+
+        // TEC_TRIP (integer)
+        if (key_len == (int)strlen("TEC_TRIP") &&
+            strncmp(json_str + key_start, "TEC_TRIP", key_len) == 0) {
+          int TEC_TRIP = (int)strtoul(tmpval, NULL, 10);
+          printf("TEC_TRIP found: %d\r\n", TEC_TRIP);
+          double r_th = temperature_to_resistance((double)TEC_TRIP);
+          TEC_TRIP_VALUE = solve_v(r_th);
+          printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, TEC_TRIP_VALUE);
+          continue;
+        }
+
+        // OPT_GAIN
+        if ((key_len == (int)strlen("OPT_GAIN") &&
+             strncmp(json_str + key_start, "OPT_GAIN", key_len) == 0)) {
+          double v = strtod(tmpval, NULL);
+          OPT_GAIN_VALUE = v;
+          printf("OPT_GAIN_VALUE found: %.6f\r\n", OPT_GAIN_VALUE);
+          continue;
+        }
+
+        // OPT_THRESH
+        if ((key_len == (int)strlen("OPT_THRESH") &&
+             strncmp(json_str + key_start, "OPT_THRESH", key_len) == 0)) {
+          double v = strtod(tmpval, NULL);
+          OPT_THRESH_VALUE = v;
+          printf("OPT_THRESH_VALUE found: %.6f\r\n", OPT_THRESH_VALUE);
+          continue;
+        }
+
+        // EE_GAIN
+        if ((key_len == (int)strlen("EE_GAIN") &&
+             strncmp(json_str + key_start, "EE_GAIN", key_len) == 0)) {
+          double v = strtod(tmpval, NULL);
+          EE_GAIN_VALUE = v;
+          printf("EE_GAIN_VALUE found: %.6f\r\n", EE_GAIN_VALUE);
+          continue;
+        }
+
+        // EE_THRESH
+        if ((key_len == (int)strlen("EE_THRESH") &&
+             strncmp(json_str + key_start, "EE_THRESH", key_len) == 0)) {
+          double v = strtod(tmpval, NULL);
+          EE_THRESH_VALUE = v;
+          printf("EE_THRESH_VALUE found: %.6f\r\n", EE_THRESH_VALUE);
+          continue;
         }
       }
     } else {
@@ -1717,11 +1774,14 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
 
-  LED_RGB_SET(LED_RED); // Red - error
-
   __disable_irq();
+  /* Flash blue LED ~500ms on/off to indicate an error state */
   while (1)
   {
+    LED_RGB_SET(LED_BLUE);
+    delay_ms(500);
+    LED_RGB_SET(LED_NONE);
+    delay_ms(500);
   }
   /* USER CODE END Error_Handler_Debug */
 }
