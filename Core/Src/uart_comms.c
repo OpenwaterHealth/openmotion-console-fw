@@ -53,6 +53,7 @@ extern FAN_Driver fan;
 extern bool _enter_dfu;
 
 extern ad5761r_dev tec_dac;
+extern double temp_trip_value;
 
 // Local helper used for sending
 void printUartPacket(const UartPacket* packet) {
@@ -238,7 +239,7 @@ size_t telemetry_read(TelemetrySample *out, size_t count)
 
 static inline float adc_to_voltage(uint16_t adc_code)
 {
-    return (adc_code * V_REF) / ADC_MAX;
+    return (adc_code * ADC_REF) / ADC_MAX;
 }
 
 /**

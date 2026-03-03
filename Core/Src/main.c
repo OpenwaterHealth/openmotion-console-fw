@@ -38,6 +38,8 @@
 #include "XO2_api.h"
 #include "XO2_cmds.h"
 #include "if_fpga_prog.h"
+#include "motion_config.h"
+#include "jsmn.h"
 #include "utils.h"
 
 #include <stdio.h>
@@ -103,7 +105,7 @@ extern bool ad5761r_enabled;
 extern FAN_Driver fan;
 static MachXO_Handle_t s_xo2_i2c_handle;
 static XO2Handle_t     s_xo2_handle;
-
+double temp_trip_value = 0.0;
 ad5761r_dev tec_dac;
 volatile bool _enter_dfu = false;
 
@@ -433,7 +435,42 @@ int main(void)
 
   // Init USB
   MX_USB_DEVICE_Init();
-  HAL_Delay(150);
+  
+  // Load motion config and check for temp_trip in JSON
+  const motion_cfg_t *cfg_ptr = motion_cfg_get();
+  if (cfg_ptr) {
+    const char *json_str = motion_cfg_get_json_ptr();
+
+    jsmn_parser parser;
+    jsmntok_t tokens[32];
+
+    jsmn_init(&parser, NULL);
+    int r = jsmn_parse(&parser, json_str, strlen(json_str), tokens, sizeof(tokens) / sizeof(tokens[0]), NULL);
+
+    if (r >= 1 && tokens[0].type == JSMN_OBJECT) {
+      for (int i = 1; i < r; i++) {
+        // Check if this is a string token and equals "temp_trip"
+        if (tokens[i].type == JSMN_STRING &&
+            strncmp(json_str + tokens[i].start, "temp_trip", 9) == 0 &&
+            tokens[i].end - tokens[i].start == 9) {
+          // Next token should be the value
+          i++;
+          if (i < r && tokens[i].type == JSMN_PRIMITIVE) {
+            int temp_trip = strtoul(json_str + tokens[i].start, NULL, 10);
+            printf("temp_trip found: %d\r\n", temp_trip);
+            // Add your logic here based on the temp_trip value
+            double r_th = temperature_to_resistance((double)temp_trip);
+            temp_trip_value = solve_v(r_th);
+            printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, temp_trip_value);
+          }
+        }
+      }
+    } else {
+      printf("Failed to parse JSON or no object found\n");
+    }
+  }
+
+  HAL_Delay(100);
 
   // Enable USB HUB
   HAL_GPIO_WritePin(HUB_RESET_GPIO_Port, HUB_RESET_Pin, GPIO_PIN_SET);

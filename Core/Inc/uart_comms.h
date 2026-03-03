@@ -26,7 +26,7 @@
 #define TELEMETRY_RING_SAMPLES      64U
 
 #define ADC_MAX 4095.0f   // 12-bit
-#define V_REF 3.30f 
+#define ADC_REF 3.30f 
 
 /** One snapshot of system telemetry collected on each poll event. */
 typedef struct __attribute__((packed)) {
