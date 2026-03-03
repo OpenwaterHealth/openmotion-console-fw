@@ -105,7 +105,13 @@ extern bool ad5761r_enabled;
 extern FAN_Driver fan;
 static MachXO_Handle_t s_xo2_i2c_handle;
 static XO2Handle_t     s_xo2_handle;
-double temp_trip_value = 0.0;
+
+double TEC_TRIP_VALUE = 0.0;
+double OPT_GAIN_VALUE = 0.0;
+double OPT_THRESH_VALUE = 0.0;
+double EE_GAIN_VALUE = 0.0;
+double EE_THRESH_VALUE = 0.0;
+
 ad5761r_dev tec_dac;
 volatile bool _enter_dfu = false;
 
@@ -449,19 +455,19 @@ int main(void)
 
     if (r >= 1 && tokens[0].type == JSMN_OBJECT) {
       for (int i = 1; i < r; i++) {
-        // Check if this is a string token and equals "temp_trip"
+        // Check if this is a string token and equals "TEC_TRIP"
         if (tokens[i].type == JSMN_STRING &&
-            strncmp(json_str + tokens[i].start, "temp_trip", 9) == 0 &&
+            strncmp(json_str + tokens[i].start, "TEC_TRIP", 8) == 0 &&
             tokens[i].end - tokens[i].start == 9) {
           // Next token should be the value
           i++;
           if (i < r && tokens[i].type == JSMN_PRIMITIVE) {
-            int temp_trip = strtoul(json_str + tokens[i].start, NULL, 10);
-            printf("temp_trip found: %d\r\n", temp_trip);
-            // Add your logic here based on the temp_trip value
-            double r_th = temperature_to_resistance((double)temp_trip);
-            temp_trip_value = solve_v(r_th);
-            printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, temp_trip_value);
+            int TEC_TRIP = strtoul(json_str + tokens[i].start, NULL, 10);
+            printf("TEC_TRIP found: %d\r\n", TEC_TRIP);
+            // Add your logic here based on the TEC_TRIP value
+            double r_th = temperature_to_resistance((double)TEC_TRIP);
+            TEC_TRIP_VALUE = solve_v(r_th);
+            printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, TEC_TRIP_VALUE);
           }
         }
       }

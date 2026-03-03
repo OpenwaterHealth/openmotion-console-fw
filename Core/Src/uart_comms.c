@@ -53,7 +53,7 @@ extern FAN_Driver fan;
 extern bool _enter_dfu;
 
 extern ad5761r_dev tec_dac;
-extern double temp_trip_value;
+extern double TEC_TRIP_VALUE;
 
 // Local helper used for sending
 void printUartPacket(const UartPacket* packet) {
