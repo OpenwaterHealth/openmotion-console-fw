@@ -109,9 +109,9 @@ static XO2Handle_t     s_xo2_handle;
 
 double TEC_TRIP_VALUE = 0.0;
 double OPT_GAIN_VALUE = 0.0;
-double OPT_THRESH_VALUE = 0.0;
+uint16_t OPT_THRESH_VALUE = 0;
 double EE_GAIN_VALUE = 0.0;
-double EE_THRESH_VALUE = 0.0;
+uint16_t EE_THRESH_VALUE = 0;
 
 ad5761r_dev tec_dac;
 volatile bool _enter_dfu = false;
@@ -504,9 +504,15 @@ int main(void)
         // OPT_THRESH
         if ((key_len == (int)strlen("OPT_THRESH") &&
              strncmp(json_str + key_start, "OPT_THRESH", key_len) == 0)) {
-          double v = strtod(tmpval, NULL);
-          OPT_THRESH_VALUE = v;
-          printf("OPT_THRESH_VALUE found: %.6f\r\n", OPT_THRESH_VALUE);
+          unsigned long v = strtoul(tmpval, NULL, 10);
+          OPT_THRESH_VALUE = (uint16_t)v;
+          printf("OPT_THRESH found: %u\r\n", (unsigned)OPT_THRESH_VALUE);
+          
+          int8_t ret = TCA9548A_Write_Data(1, 7, 0x41, 0x10, 2, (uint8_t*)&OPT_THRESH_VALUE);
+          if (ret!= TCA9548A_OK) {
+              printf("ERROR setting OPT_THRESH_VALUE\r\n");
+          }
+
           continue;
         }
 
@@ -522,9 +528,15 @@ int main(void)
         // EE_THRESH
         if ((key_len == (int)strlen("EE_THRESH") &&
              strncmp(json_str + key_start, "EE_THRESH", key_len) == 0)) {
-          double v = strtod(tmpval, NULL);
-          EE_THRESH_VALUE = v;
-          printf("EE_THRESH_VALUE found: %.6f\r\n", EE_THRESH_VALUE);
+          unsigned long v = strtoul(tmpval, NULL, 10);
+          EE_THRESH_VALUE = (uint16_t)v;
+          printf("EE_THRESH found: %u\r\n", (unsigned)EE_THRESH_VALUE);
+
+          int8_t ret = TCA9548A_Write_Data(1, 6, 0x41, 0x10, 2, (uint8_t*)&EE_THRESH_VALUE);
+          if (ret!= TCA9548A_OK) {
+              printf("ERROR setting EE_THRESH_VALUE\r\n");
+          }
+
           continue;
         }
       }

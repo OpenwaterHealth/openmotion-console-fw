@@ -63,7 +63,7 @@ static void motion_cfg_make_defaults(motion_cfg_t *dst)
 
     /* Initialize JSON with sensible defaults so an empty config contains useful values. */
     {
-        const char *default_json = "{\"TEC_TRIP\": 40.0, \"OPT_THRESH\": 2200.0, \"EE_THRESH\": 2300.0, \"EE_GAIN\": 2.0, \"OPT_GAIN\": 4.3}";
+        const char *default_json = "{\"TEC_TRIP\": 40, \"OPT_THRESH\": 7143, \"EE_THRESH\": 5000, \"EE_GAIN\": 1.86, \"OPT_GAIN\": 1.86}";
         /* Ensure we never overflow the JSON buffer. */
         snprintf(dst->json, MOTION_CFG_JSON_MAX, "%s", default_json);
     }

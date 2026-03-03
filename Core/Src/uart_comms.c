@@ -295,6 +295,11 @@ void telemetry_poll(void)
 
 	sample.tec_status = HAL_GPIO_ReadPin(TEMPGD_GPIO_Port, TEMPGD_Pin)?false:true;  // active low
 
+	if(TEC_TRIP_VALUE != 0.0 && adc_to_voltage(sample.tec_adc[0])>TEC_TRIP_VALUE){
+		// error
+		printf("++++> ERROR TEC TRIP SET\r\n");
+	}
+
 	/* --- end timed acquisition --- */
 	uint32_t dwt_cycles = DWT->CYCCNT - dwt_start;
 	sample.acq_time_us  = dwt_cycles / (SystemCoreClock / 1000000U);
