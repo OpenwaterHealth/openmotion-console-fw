@@ -360,7 +360,7 @@ int main(void)
 
   // HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); // TA Trigger
 
-  LED_RGB_SET(LED_RED); // RED - starting up
+  LED_RGB_SET(LED_GREEN); // GREEN - starting up
 
   // Initialize first multiplexer on I2C1 with default address
   for(int i = 0; i < 2; i++)
@@ -454,6 +454,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     comms_process();
     telemetry_poll();
+    HAL_Delay(1);
   }
   /* USER CODE END 3 */
 }

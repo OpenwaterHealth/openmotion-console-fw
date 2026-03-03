@@ -20,6 +20,8 @@
 #include "if_commands.h"
 
 #include "lwrb.h"
+#include <math.h>
+#include <stdbool.h>
 #include <string.h>
 
 #define PDU_N 16
@@ -124,7 +126,7 @@ void comms_process(void)
 {
 	if (!rx_flag) return;
 
-	UartPacket cmd;
+	UartPacket cmd = {0};
 	UartPacket resp;
 	uint16_t calculated_crc;
 	int bufferIndex = 0;
@@ -233,6 +235,12 @@ size_t telemetry_read(TelemetrySample *out, size_t count)
 	       / sizeof(TelemetrySample);
 }
 
+
+static inline float adc_to_voltage(uint16_t adc_code)
+{
+    return (adc_code * V_REF) / ADC_MAX;
+}
+
 /**
  * @brief  Main-loop telemetry worker.
  *
@@ -283,6 +291,8 @@ void telemetry_poll(void)
 	sample.tec_adc[1] = tec_raw[1];
 	sample.tec_adc[2] = tec_raw[2];
 	sample.tec_adc[3] = tec_raw[3];
+
+	sample.tec_status = HAL_GPIO_ReadPin(TEMPGD_GPIO_Port, TEMPGD_Pin)?false:true;  // active low
 
 	/* --- end timed acquisition --- */
 	uint32_t dwt_cycles = DWT->CYCCNT - dwt_start;

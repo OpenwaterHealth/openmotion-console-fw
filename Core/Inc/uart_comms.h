@@ -25,6 +25,9 @@
 /** Number of TelemetrySamples held in the ring buffer. */
 #define TELEMETRY_RING_SAMPLES      64U
 
+#define ADC_MAX 4095.0f   // 12-bit
+#define V_REF 3.30f 
+
 /** One snapshot of system telemetry collected on each poll event. */
 typedef struct __attribute__((packed)) {
     uint32_t timestamp_ms;   /*!< HAL_GetTick() at capture time */
@@ -33,6 +36,7 @@ typedef struct __attribute__((packed)) {
     float    t2;             /*!< MAX31875 sensor 2 temperature (°C) */
     float    t3;             /*!< MAX31875 sensor 3 temperature (°C) */
     uint16_t tec_adc[4];     /*!< ADS7924 channels 0-3 (raw 12-bit codes) */
+    bool     tec_status;     /* TEC Status */
 } TelemetrySample;
 
 /* ---------------------------------------------------------------------------
