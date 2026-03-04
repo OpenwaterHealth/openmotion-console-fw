@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 static motion_cfg_t g_cfg;
 static bool       g_cfg_loaded = false;
@@ -60,11 +61,11 @@ static void motion_cfg_make_defaults(motion_cfg_t *dst)
     dst->version    = MOTION_VER;
     dst->seq        = 0;
 
-    dst->json[0]    = '\0';
-    if (MOTION_CFG_JSON_MAX > 1U) {
-        memset(&dst->json[1],
-               0,
-               MOTION_CFG_JSON_MAX - 1U);
+    /* Initialize JSON with sensible defaults so an empty config contains useful values. */
+    {
+        const char *default_json = "{\"TEC_TRIP\": 40, \"OPT_THRESH\": 7143, \"EE_THRESH\": 5000, \"EE_GAIN\": 1.86, \"OPT_GAIN\": 1.86}";
+        /* Ensure we never overflow the JSON buffer. */
+        snprintf(dst->json, MOTION_CFG_JSON_MAX, "%s", default_json);
     }
 
     motion_cfg_normalize_json(dst);

@@ -360,7 +360,7 @@ void CDC_ReceiveToIdle(uint8_t* Buf, uint16_t max_size)
     rxIndex = 0;
     rxMaxSize = max_size;
     pRX = Buf;
-	read_to_idle_enabled = 1;
+	  read_to_idle_enabled = 1;
 }
 
 extern void CDC_handle_RxCpltCallback(uint16_t len);

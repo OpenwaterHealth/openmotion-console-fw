@@ -8,11 +8,7 @@
 #include "main.h"
 #include "uart_comms.h"
 #include "utils.h"
-#include "FreeRTOS.h"
-#include "semphr.h"
-#include "task.h"
 #include "usbd_cdc_if.h"
-#include "cmsis_os.h"
 #include "tca9548a.h"
 #include "trigger.h"
 #include "fan_driver.h"
@@ -22,10 +18,23 @@
 #include "max31875.h"
 #include "led_driver.h"
 #include "if_commands.h"
+#include "msg_queue.h"
 
+#include "lwrb.h"
+#include <math.h>
+#include <stdbool.h>
 #include <string.h>
 
 #define PDU_N 16
+
+/* ---------------------------------------------------------------------------
+ * Telemetry ring buffer — backing store and runtime state
+ * ---------------------------------------------------------------------------*/
+#define TELEMETRY_BUF_BYTES  (TELEMETRY_RING_SAMPLES * sizeof(TelemetrySample))
+static uint8_t          s_rb_storage[TELEMETRY_BUF_BYTES];
+static lwrb_t           s_telemetry_rb;
+static volatile uint8_t s_telemetry_tick = 0; /* set by timer ISR */
+static uint32_t         s_last_poll_ms   = 0;
 
 // Private variables
 extern uint8_t rxBuffer[COMMAND_MAX_SIZE];
@@ -36,10 +45,7 @@ extern ADS7828_HandleTypeDef adc_mon[2];
 volatile uint32_t ptrReceive;
 volatile uint8_t rx_flag = 0;
 volatile uint8_t tx_flag = 0;
-
-SemaphoreHandle_t uartTxSemaphore;
-SemaphoreHandle_t xRxSemaphore;
-TaskHandle_t commsTaskHandle;
+volatile uint8_t tx_busy = 0;
 
 /* consoleTemps is owned by the command-processing module */
 extern ConsoleTemperatures consoleTemps;
@@ -48,12 +54,7 @@ extern FAN_Driver fan;
 extern bool _enter_dfu;
 
 extern ad5761r_dev tec_dac;
-
-const osThreadAttr_t comm_rec_task_attribs = {
-  .name = "comRecTask",
-  .stack_size = 2048 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
-};
+extern double TEC_TRIP_VALUE;
 
 // Local helper used for sending
 void printUartPacket(const UartPacket* packet) {
@@ -85,160 +86,272 @@ void printUartPacket(const UartPacket* packet) {
 
 static void UART_INTERFACE_SendDMA(UartPacket* pResp)
 {
-	// Wait for semaphore availability before proceeding
-	if (xSemaphoreTake(uartTxSemaphore, portMAX_DELAY) == pdTRUE) {
-		memset(txBuffer, 0, sizeof(txBuffer));
-		int bufferIndex = 0;
-
-		txBuffer[bufferIndex++] = OW_START_BYTE;
-		txBuffer[bufferIndex++] = pResp->id >> 8;
-		txBuffer[bufferIndex++] = pResp->id & 0xFF;
-		txBuffer[bufferIndex++] = pResp->packet_type;
-		txBuffer[bufferIndex++] = pResp->command;
-		txBuffer[bufferIndex++] = pResp->addr;
-		txBuffer[bufferIndex++] = pResp->reserved;
-		txBuffer[bufferIndex++] = (pResp->data_len) >> 8;
-		txBuffer[bufferIndex++] = (pResp->data_len) & 0xFF;
-		if(pResp->data_len > 0)
-		{
-			memcpy(&txBuffer[bufferIndex], pResp->data, pResp->data_len);
-			bufferIndex += pResp->data_len;
-		}
-		uint16_t crc = util_crc16(&txBuffer[1], pResp->data_len + 8);
-		txBuffer[bufferIndex++] = crc >> 8;
-		txBuffer[bufferIndex++] = crc & 0xFF;
-
-		txBuffer[bufferIndex++] = OW_END_BYTE;
-
-		CDC_Transmit_FS(txBuffer, bufferIndex);
-		while(!tx_flag);
-		xSemaphoreGive(uartTxSemaphore);
+	if (!pResp) return;
+	// Wait for previous transmission to complete
+	while (tx_busy) {
+		HAL_Delay(1);
 	}
+	memset(txBuffer, 0, sizeof(txBuffer));
+	int bufferIndex = 0;
+
+	txBuffer[bufferIndex++] = OW_START_BYTE;
+	txBuffer[bufferIndex++] = pResp->id >> 8;
+	txBuffer[bufferIndex++] = pResp->id & 0xFF;
+	txBuffer[bufferIndex++] = pResp->packet_type;
+	txBuffer[bufferIndex++] = pResp->command;
+	txBuffer[bufferIndex++] = pResp->addr;
+	txBuffer[bufferIndex++] = pResp->reserved;
+	txBuffer[bufferIndex++] = (pResp->data_len) >> 8;
+	txBuffer[bufferIndex++] = (pResp->data_len) & 0xFF;
+	if (pResp->data_len > 0) {
+		memcpy(&txBuffer[bufferIndex], pResp->data, pResp->data_len);
+		bufferIndex += pResp->data_len;
+	}
+	uint16_t crc = util_crc16(&txBuffer[1], pResp->data_len + 8);
+	txBuffer[bufferIndex++] = crc >> 8;
+	txBuffer[bufferIndex++] = crc & 0xFF;
+
+	txBuffer[bufferIndex++] = OW_END_BYTE;
+
+	tx_flag = 0;
+	tx_busy = 1;
+	CDC_Transmit_FS(txBuffer, bufferIndex);
+	// Wait for transmit complete (blocking). In no-OS designs this is typical from main loop
+	while (!tx_flag) {
+		HAL_Delay(1);
+	}
+	tx_busy = 0;
 }
 
-void comms_receive_task(void *argument) {
+// Process one received packet if available. Call this periodically from main loop.
+void comms_process(void)
+{
+	if (!rx_flag) return;
 
-	memset(rxBuffer, 0, sizeof(rxBuffer));
-	ptrReceive = 0;
-
-	CDC_FlushRxBuffer_FS();
-
-	UartPacket cmd;
+	UartPacket cmd = {0};
 	UartPacket resp;
 	uint16_t calculated_crc;
-	rx_flag = 0;
-	tx_flag = 0;
-	while(1) {
-		CDC_ReceiveToIdle(rxBuffer, COMMAND_MAX_SIZE);
+	int bufferIndex = 0;
 
-		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-		int bufferIndex = 0;
-
-		if(rxBuffer[bufferIndex++] != OW_START_BYTE) {
-			resp.id = cmd.id;
-			resp.data_len = 0;
-			resp.packet_type = OW_NAK;
-			goto NextDataPacket;
-		}
-
-		cmd.id = (rxBuffer[bufferIndex] << 8 | (rxBuffer[bufferIndex+1] & 0xFF ));
-		bufferIndex+=2;
-		cmd.packet_type = rxBuffer[bufferIndex++];
-		cmd.command = rxBuffer[bufferIndex++];
-		cmd.addr = rxBuffer[bufferIndex++];
-		cmd.reserved = rxBuffer[bufferIndex++];
-
-		// Extract payload length
-		cmd.data_len = (rxBuffer[bufferIndex] << 8 | (rxBuffer[bufferIndex+1] & 0xFF ));
-		bufferIndex+=2;
-
-		// Check if data length is valid
-		if (cmd.data_len > COMMAND_MAX_SIZE - bufferIndex && rxBuffer[COMMAND_MAX_SIZE-1] != OW_END_BYTE) {
-			resp.id = cmd.id;
-			resp.addr = 0;
-			resp.reserved = 0;
-			resp.data_len = 0;
-			resp.packet_type = OW_NAK;
-			goto NextDataPacket;
-		}
-
-		// Extract data pointer
-		cmd.data = &rxBuffer[bufferIndex];
-		if (cmd.data_len > COMMAND_MAX_SIZE)
-		{
-			bufferIndex=COMMAND_MAX_SIZE-3; // [3 bytes from the end should be the crc for a continuation packet]
-		}else{
-			bufferIndex += cmd.data_len; // move pointer to end of data
-		}
-
-		// Extract received CRC
-		cmd.crc = (rxBuffer[bufferIndex] << 8 | (rxBuffer[bufferIndex+1] & 0xFF ));
-		bufferIndex+=2;
-
-		// Calculate CRC for received data
-
-		if (cmd.data_len > COMMAND_MAX_SIZE)
-		{
-			calculated_crc = util_crc16(&rxBuffer[1], COMMAND_MAX_SIZE-3);
-		}
-		else
-		{
-			calculated_crc = util_crc16(&rxBuffer[1], cmd.data_len + 8);
-		}
-
-		// Check CRC
-		if (cmd.crc != calculated_crc) {
-			resp.id = cmd.id;
-			resp.addr = 0;
-			resp.reserved = 0;
-			resp.data_len = 0;
-			resp.packet_type = OW_BAD_CRC;
-			goto NextDataPacket;
-		}
-
-		// Check end byte
-		if (rxBuffer[bufferIndex++] != OW_END_BYTE) {
-			resp.id = cmd.id;
-			resp.data_len = 0;
-			resp.addr = 0;
-			resp.reserved = 0;
-			resp.packet_type = OW_NAK;
-			goto NextDataPacket;
-		}
-
-		process_if_command(&resp, &cmd);
-
-	NextDataPacket:
-		UART_INTERFACE_SendDMA(&resp);
-		memset(rxBuffer, 0, sizeof(rxBuffer));
-		ptrReceive=0;
-		rx_flag = 0;
+	if (rxBuffer[bufferIndex++] != OW_START_BYTE) {
+		resp.id = cmd.id;
+		resp.data_len = 0;
+		resp.packet_type = OW_NAK;
+		goto NextDataPacket;
 	}
 
+	cmd.id = (rxBuffer[bufferIndex] << 8 | (rxBuffer[bufferIndex+1] & 0xFF ));
+	bufferIndex += 2;
+	cmd.packet_type = rxBuffer[bufferIndex++];
+	cmd.command = rxBuffer[bufferIndex++];
+	cmd.addr = rxBuffer[bufferIndex++];
+	cmd.reserved = rxBuffer[bufferIndex++];
+
+	// Extract payload length
+	cmd.data_len = (rxBuffer[bufferIndex] << 8 | (rxBuffer[bufferIndex+1] & 0xFF ));
+	bufferIndex += 2;
+
+	// Check if data length is valid
+	if (cmd.data_len > COMMAND_MAX_SIZE - bufferIndex && rxBuffer[COMMAND_MAX_SIZE-1] != OW_END_BYTE) {
+		resp.id = cmd.id;
+		resp.addr = 0;
+		resp.reserved = 0;
+		resp.data_len = 0;
+		resp.packet_type = OW_NAK;
+		goto NextDataPacket;
+	}
+
+	// Extract data pointer
+	cmd.data = &rxBuffer[bufferIndex];
+	if (cmd.data_len > COMMAND_MAX_SIZE) {
+		bufferIndex = COMMAND_MAX_SIZE-3; // [3 bytes from the end should be the crc for a continuation packet]
+	} else {
+		bufferIndex += cmd.data_len; // move pointer to end of data
+	}
+
+	// Extract received CRC
+	cmd.crc = (rxBuffer[bufferIndex] << 8 | (rxBuffer[bufferIndex+1] & 0xFF ));
+	bufferIndex += 2;
+
+	// Calculate CRC for received data
+	if (cmd.data_len > COMMAND_MAX_SIZE) {
+		calculated_crc = util_crc16(&rxBuffer[1], COMMAND_MAX_SIZE-3);
+	} else {
+		calculated_crc = util_crc16(&rxBuffer[1], cmd.data_len + 8);
+	}
+
+	// Check CRC
+	if (cmd.crc != calculated_crc) {
+		resp.id = cmd.id;
+		resp.addr = 0;
+		resp.reserved = 0;
+		resp.data_len = 0;
+		resp.packet_type = OW_BAD_CRC;
+		goto NextDataPacket;
+	}
+
+	// Check end byte
+	if (rxBuffer[bufferIndex++] != OW_END_BYTE) {
+		resp.id = cmd.id;
+		resp.data_len = 0;
+		resp.addr = 0;
+		resp.reserved = 0;
+		resp.packet_type = OW_NAK;
+		goto NextDataPacket;
+	}
+
+	process_if_command(&resp, &cmd);
+
+NextDataPacket:
+	UART_INTERFACE_SendDMA(&resp);
+	memset(rxBuffer, 0, sizeof(rxBuffer));
+	ptrReceive = 0;
+	rx_flag = 0;
+	// Restart reception
+	CDC_ReceiveToIdle(rxBuffer, COMMAND_MAX_SIZE);
 }
 
-// This is the FreeRTOS task
-void comms_init() {
-	printf("Initilize comms task\r\n");
+/* ---------------------------------------------------------------------------
+ * Telemetry API
+ * ---------------------------------------------------------------------------*/
+
+/** Called from a hardware timer ISR — just sets a flag, no I2C in the ISR. */
+void comms_telemetry_tick(void)
+{
+	s_telemetry_tick = 1;
+}
+
+/** Returns the number of complete TelemetrySamples waiting in the ring buffer. */
+size_t telemetry_available(void)
+{
+	return lwrb_get_full(&s_telemetry_rb) / sizeof(TelemetrySample);
+}
+
+/** Reads up to @p count samples into @p out; returns actual number read. */
+size_t telemetry_read(TelemetrySample *out, size_t count)
+{
+	if (!out || !count) return 0;
+	size_t avail   = lwrb_get_full(&s_telemetry_rb) / sizeof(TelemetrySample);
+	size_t to_read = (count < avail) ? count : avail;
+	return lwrb_read(&s_telemetry_rb, out, to_read * sizeof(TelemetrySample))
+	       / sizeof(TelemetrySample);
+}
+
+
+static inline float adc_to_voltage(uint16_t adc_code)
+{
+    return (adc_code * ADC_REF) / ADC_MAX;
+}
+
+/**
+ * @brief  Main-loop telemetry worker.
+ *
+ * Runs every TELEMETRY_POLL_INTERVAL_MS or immediately when
+ * comms_telemetry_tick() has been called from a timer ISR.
+ * Reads temperatures and TEC ADC, updates consoleTemps, then
+ * pushes a TelemetrySample into the ring buffer.  Oldest samples
+ * are silently discarded if the consumer falls behind.
+ */
+volatile uint32_t _trip_counter = 0;
+volatile bool _trip_set = false;
+
+void telemetry_poll(void)
+{
+	uint32_t now = HAL_GetTick();
+
+	/* skip unless the timer fired or the fallback interval has elapsed */
+	if (!s_telemetry_tick &&
+	    (now - s_last_poll_ms) < TELEMETRY_POLL_INTERVAL_MS) {
+		return;
+	}
+	s_telemetry_tick = 0;
+	s_last_poll_ms   = now;
+
+	TelemetrySample sample = {0};
+	sample.timestamp_ms = now;
+
+	/* --- begin timed acquisition --- */
+	uint32_t dwt_start = DWT->CYCCNT;
+
+	/* Temperatures — sensors sit behind mux 1 channel 1 */
+	TCA9548A_SelectChannel(1, 1);
+	sample.t1 = MAX31875_ReadTemperature(MAX31875_TEMP1_DEV_ADDR);
+	sample.t2 = MAX31875_ReadTemperature(MAX31875_TEMP2_DEV_ADDR);
+	sample.t3 = MAX31875_ReadTemperature(MAX31875_TEMP3_DEV_ADDR);
+
+	/* Keep the shared console-temp struct in sync */
+	consoleTemps.f.t1 = sample.t1;
+	consoleTemps.f.t2 = sample.t2;
+	consoleTemps.f.t3 = sample.t3;
+
+	/* TEC ADC — four channels on ads7924.
+	 * Use aligned locals to avoid -Waddress-of-packed-member on the
+	 * packed struct members, then copy into the sample. */
+	uint16_t tec_raw[4] = {0};
+	ADS7924_ReadRaw(&tec_ads, ADS7924_CH0, &tec_raw[0], 10);
+	ADS7924_ReadRaw(&tec_ads, ADS7924_CH1, &tec_raw[1], 10);
+	ADS7924_ReadRaw(&tec_ads, ADS7924_CH2, &tec_raw[2], 10);
+	ADS7924_ReadRaw(&tec_ads, ADS7924_CH3, &tec_raw[3], 10);
+	sample.tec_adc[0] = tec_raw[0];
+	sample.tec_adc[1] = tec_raw[1];
+	sample.tec_adc[2] = tec_raw[2];
+	sample.tec_adc[3] = tec_raw[3];
+
+	sample.tec_status = HAL_GPIO_ReadPin(TEMPGD_GPIO_Port, TEMPGD_Pin)?false:true;  // active low
+
+	if(TEC_TRIP_VALUE != 0.0 && adc_to_voltage(sample.tec_adc[0])>TEC_TRIP_VALUE){
+		// error		
+		_trip_counter = 0;
+		Trigger_Safety_Disconnect();
+		if(!_trip_set){
+			/* push a system error JSON message into the message queue */
+			const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"TEC trip point reached\"}";
+			if (!mq_push(msg, strlen(msg))) {
+				printf("Failed to push trip message to queue\r\n");
+			}
+		}
+		_trip_set = true;
+		printf("++++> ERROR TEC TRIP SET\r\n");
+		
+
+	}else{
+		_trip_counter++;
+		if(_trip_counter > 200 && _trip_set){
+			Trigger_Safety_Clear();
+			_trip_set = false;
+		}
+	}
+
+	/* --- end timed acquisition --- */
+	uint32_t dwt_cycles = DWT->CYCCNT - dwt_start;
+	sample.acq_time_us  = dwt_cycles / (SystemCoreClock / 1000000U);
+
+	/* Evict oldest sample if ring buffer is full */
+	if (lwrb_get_free(&s_telemetry_rb) < sizeof(TelemetrySample)) {
+		lwrb_skip(&s_telemetry_rb, sizeof(TelemetrySample));
+	}
+	lwrb_write(&s_telemetry_rb, &sample, sizeof(TelemetrySample));
+}
+
+void comms_init(void) {
+	printf("Initilize comms (no-RTOS)\r\n");
 
 	/* initialize console temps via the command module ownership */
 	consoleTemps.f.t1 = 0;
 	consoleTemps.f.t2 = 0;
 	consoleTemps.f.t3 = 0;
 
-	uartTxSemaphore = xSemaphoreCreateBinary();
-	xSemaphoreGive(uartTxSemaphore); // Initially available for transmission
-	xRxSemaphore = xSemaphoreCreateBinary();
-	if (xRxSemaphore == NULL) {
-		// Handle semaphore creation failure
-		printf("failed to create xRxSemaphore\r\n");
-	}
+	tx_busy = 0;
+	tx_flag = 0;
+	rx_flag = 0;
 
-	commsTaskHandle = osThreadNew(comms_receive_task, NULL, &comm_rec_task_attribs);
-	if (commsTaskHandle == NULL) {
-		printf("Failed to create comms Task\r\n");
-	}
+	/* initialize telemetry ring buffer */
+	lwrb_init(&s_telemetry_rb, s_rb_storage, sizeof(s_rb_storage));
+	s_telemetry_tick = 0;
+	s_last_poll_ms   = HAL_GetTick();
+
+	CDC_FlushRxBuffer_FS();
+	CDC_ReceiveToIdle(rxBuffer, COMMAND_MAX_SIZE);
 }
 
 // Callback functions
@@ -252,11 +365,6 @@ void comms_handle_RxCpltCallback(UART_HandleTypeDef *huart, uint16_t pos) {
 
 void CDC_handle_RxCpltCallback(uint16_t len) {
 	rx_flag = 1;
-	// printf("CDC_handle_RxCpltCallback enter\r\n");
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    vTaskNotifyGiveFromISR(commsTaskHandle, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-	// printf("CDC_handle_RxCpltCallback exit\r\n");
 }
 
 void CDC_handle_TxCpltCallback() {

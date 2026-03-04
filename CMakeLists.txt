@@ -78,6 +78,9 @@ enable_language(C ASM)
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
 
+# Enable float printing in printf
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -u _printf_float)
+
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
@@ -108,6 +111,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/XO2_api.c
     Core/Src/if_commands.c
     Core/Src/if_fpga_prog.c
+    Core/Src/msg_queue.c
     Core/Src/uart_comms.c
     Core/Src/flash_eeprom.c
     Core/Src/motion_config.c

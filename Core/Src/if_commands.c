@@ -19,6 +19,7 @@
 #include "max31875.h"
 #include "led_driver.h"
 #include "motion_config.h"
+#include "msg_queue.h"
 
 #include <string.h>
 
@@ -290,6 +291,7 @@ static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
             uartResp->addr = cmd->addr;
             uartResp->reserved = cmd->reserved;
 
+#if 0
             TCA9548A_SelectChannel(1, 1);
 
             consoleTemps.f.t1 = MAX31875_ReadTemperature(MAX31875_TEMP1_DEV_ADDR);
@@ -298,6 +300,16 @@ static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
 
             uartResp->data_len    = sizeof(consoleTemps.bytes);
             uartResp->data = consoleTemps.bytes;
+#endif /* 0 */
+
+            {
+                /* Drain the telemetry ring buffer — up to 1024 bytes of samples. */
+                static TelemetrySample s_telem_resp_buf[1024U / sizeof(TelemetrySample)];
+                size_t n = telemetry_read(s_telem_resp_buf,
+                                          sizeof(s_telem_resp_buf) / sizeof(TelemetrySample));
+                uartResp->data_len = (uint16_t)(n * sizeof(TelemetrySample));
+                uartResp->data     = (uint8_t *)s_telem_resp_buf;
+            }
 
             break;
         case OW_CTRL_TEC_STATUS:
@@ -416,6 +428,43 @@ _Bool process_if_command(UartPacket *uartResp, UartPacket *cmd)
             id_words[2] = HAL_GetUIDw2();
             uartResp->data_len = 16;
             uartResp->data = (uint8_t *)&id_words;
+            break;
+        case OW_CMD_MESSAGES:
+            uartResp->command = OW_CMD_MESSAGES;
+            {
+                const uint16_t max_payload = (uint16_t)(COMMAND_MAX_SIZE - 12U);
+                static uint8_t out_buf[COMMAND_MAX_SIZE];
+                size_t out_idx = 0;
+                char tmp_msg[MQ_MAX_MSG_SIZE];
+                size_t msg_len = 0;
+
+                while (mq_peek(tmp_msg, sizeof(tmp_msg), &msg_len)) {
+                    /* check if message + optional separator fits */
+                    size_t sep = (out_idx == 0) ? 0 : 1; /* newline between messages */
+                    if ((out_idx + sep + msg_len) > (size_t)max_payload) {
+                        break; /* won't fit */
+                    }
+
+                    /* pop message and append */
+                    if (!mq_pop(tmp_msg, sizeof(tmp_msg), &msg_len)) {
+                        break; /* race or error */
+                    }
+
+                    if (sep) {
+                        out_buf[out_idx++] = '\n';
+                    }
+                    memcpy(&out_buf[out_idx], tmp_msg, msg_len);
+                    out_idx += msg_len;
+                }
+
+                if (out_idx == 0) {
+                    uartResp->data_len = 0;
+                    uartResp->data = NULL;
+                } else {
+                    uartResp->data_len = (uint16_t)out_idx;
+                    uartResp->data = out_buf;
+                }
+            }
             break;
         case OW_CMD_TOGGLE_LED:
             break;

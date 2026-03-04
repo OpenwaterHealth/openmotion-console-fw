@@ -15,11 +15,10 @@
   *
   ******************************************************************************
   */
+ #include "version.h"
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
-#include "version.h"
 #include "main.h"
-#include "cmsis_os.h"
 #include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -39,11 +38,15 @@
 #include "XO2_api.h"
 #include "XO2_cmds.h"
 #include "if_fpga_prog.h"
+#include "motion_config.h"
+#include "jsmn.h"
 #include "utils.h"
+#include "msg_queue.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
 /* USER CODE END Includes */
 
@@ -82,6 +85,8 @@ SPI_HandleTypeDef hspi4;
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim4;  /* 250 ms telemetry poll timer */
+TIM_HandleTypeDef htim8;
 TIM_HandleTypeDef htim12;
 TIM_HandleTypeDef htim15;
 
@@ -89,13 +94,6 @@ UART_HandleTypeDef huart4;
 DMA_HandleTypeDef hdma_uart4_rx;
 DMA_HandleTypeDef hdma_uart4_tx;
 
-/* Definitions for defaultTask */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name = "defaultTask",
-  .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
 /* USER CODE BEGIN PV */
 
 uint8_t rxBuffer[COMMAND_MAX_SIZE];
@@ -109,6 +107,12 @@ extern bool ad5761r_enabled;
 extern FAN_Driver fan;
 static MachXO_Handle_t s_xo2_i2c_handle;
 static XO2Handle_t     s_xo2_handle;
+
+double TEC_TRIP_VALUE = 0.0;
+double OPT_GAIN_VALUE = 0.0;
+uint16_t OPT_THRESH_VALUE = 0;
+double EE_GAIN_VALUE = 0.0;
+uint16_t EE_THRESH_VALUE = 0;
 
 ad5761r_dev tec_dac;
 volatile bool _enter_dfu = false;
@@ -137,8 +141,8 @@ static void MX_SPI1_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_SPI3_Init(void);
 static void MX_SPI4_Init(void);
-void StartDefaultTask(void *argument);
-
+static void MX_TIM4_Init(void);
+static void MX_TIM8_Init(void);
 /* USER CODE BEGIN PFP */
 
 #ifdef SCAN_DISPLAY
@@ -264,6 +268,8 @@ int main(void)
   MX_SPI2_Init();
   MX_SPI3_Init();
   MX_SPI4_Init();
+  MX_TIM4_Init();
+  MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
 
   init_dma_logging();
@@ -364,7 +370,7 @@ int main(void)
 
   // HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); // TA Trigger
 
-  LED_RGB_SET(LED_RED); // RED - starting up
+  LED_RGB_SET(LED_GREEN); // GREEN - starting up
 
   // Initialize first multiplexer on I2C1 with default address
   for(int i = 0; i < 2; i++)
@@ -435,51 +441,125 @@ int main(void)
   PCA9535APW_Init(&hi2c2);
   PCA9535APW_WritePin(0, 7, 1); // shut led off
 
+  // Init USB
+  MX_USB_DEVICE_Init();
+  // Initialize message queue for system JSON messages
+  printf("Initialize message queue\r\n");
+  mq_init();
+  
+  // Load motion config and check for temp_trip in JSON
+  const motion_cfg_t *cfg_ptr = motion_cfg_get();
+  if (cfg_ptr) {
+    const char *json_str = motion_cfg_get_json_ptr();
+
+    jsmn_parser parser;
+    jsmntok_t tokens[32];
+
+    jsmn_init(&parser, NULL);
+    int r = jsmn_parse(&parser, json_str, strlen(json_str), tokens, sizeof(tokens) / sizeof(tokens[0]), NULL);
+
+    if (r >= 1 && tokens[0].type == JSMN_OBJECT) {
+      for (int i = 1; i < r; i++) {
+        if (tokens[i].type != JSMN_STRING) {
+          continue;
+        }
+
+        int key_start = tokens[i].start;
+        int key_len = tokens[i].end - tokens[i].start;
+
+        // Advance to the value token
+        i++;
+        if (i >= r) {
+          break;
+        }
+
+        // Helper to copy primitive text into a NUL-terminated buffer
+        if (tokens[i].type != JSMN_PRIMITIVE) {
+          continue;
+        }
+
+        int val_start = tokens[i].start;
+        int val_len = tokens[i].end - tokens[i].start;
+        char tmpval[64];
+        int copy_len = (val_len < (int)sizeof(tmpval) - 1) ? val_len : (int)sizeof(tmpval) - 1;
+        memcpy(tmpval, json_str + val_start, copy_len);
+        tmpval[copy_len] = '\0';
+
+        // TEC_TRIP (integer)
+        if (key_len == (int)strlen("TEC_TRIP") &&
+            strncmp(json_str + key_start, "TEC_TRIP", key_len) == 0) {
+          int TEC_TRIP = (int)strtoul(tmpval, NULL, 10);
+          printf("TEC_TRIP found: %d\r\n", TEC_TRIP);
+          double r_th = temperature_to_resistance((double)TEC_TRIP);
+          TEC_TRIP_VALUE = solve_v(r_th);
+          printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, TEC_TRIP_VALUE);
+          continue;
+        }
+
+        // OPT_GAIN
+        if ((key_len == (int)strlen("OPT_GAIN") &&
+             strncmp(json_str + key_start, "OPT_GAIN", key_len) == 0)) {
+          double v = strtod(tmpval, NULL);
+          OPT_GAIN_VALUE = v;
+          printf("OPT_GAIN_VALUE found: %.6f\r\n", OPT_GAIN_VALUE);
+          continue;
+        }
+
+        // OPT_THRESH
+        if ((key_len == (int)strlen("OPT_THRESH") &&
+             strncmp(json_str + key_start, "OPT_THRESH", key_len) == 0)) {
+          unsigned long v = strtoul(tmpval, NULL, 10);
+          OPT_THRESH_VALUE = (uint16_t)v;
+          printf("OPT_THRESH found: %u\r\n", (unsigned)OPT_THRESH_VALUE);
+          
+          int8_t ret = TCA9548A_Write_Data(1, 7, 0x41, 0x10, 2, (uint8_t*)&OPT_THRESH_VALUE);
+          if (ret!= TCA9548A_OK) {
+              printf("ERROR setting OPT_THRESH_VALUE\r\n");
+          }
+
+          continue;
+        }
+
+        // EE_GAIN
+        if ((key_len == (int)strlen("EE_GAIN") &&
+             strncmp(json_str + key_start, "EE_GAIN", key_len) == 0)) {
+          double v = strtod(tmpval, NULL);
+          EE_GAIN_VALUE = v;
+          printf("EE_GAIN_VALUE found: %.6f\r\n", EE_GAIN_VALUE);
+          continue;
+        }
+
+        // EE_THRESH
+        if ((key_len == (int)strlen("EE_THRESH") &&
+             strncmp(json_str + key_start, "EE_THRESH", key_len) == 0)) {
+          unsigned long v = strtoul(tmpval, NULL, 10);
+          EE_THRESH_VALUE = (uint16_t)v;
+          printf("EE_THRESH found: %u\r\n", (unsigned)EE_THRESH_VALUE);
+
+          int8_t ret = TCA9548A_Write_Data(1, 6, 0x41, 0x10, 2, (uint8_t*)&EE_THRESH_VALUE);
+          if (ret!= TCA9548A_OK) {
+              printf("ERROR setting EE_THRESH_VALUE\r\n");
+          }
+
+          continue;
+        }
+      }
+    } else {
+      printf("Failed to parse JSON or no object found\n");
+    }
+  }
+
+  HAL_Delay(100);
+
   // Enable USB HUB
   HAL_GPIO_WritePin(HUB_RESET_GPIO_Port, HUB_RESET_Pin, GPIO_PIN_SET);
-  HAL_Delay(250);
+  HAL_Delay(100);
+
+  comms_init();
+  /* Start TIM4 interrupt for telemetry polling (250 ms) */
+  HAL_TIM_Base_Start_IT(&htim4);
 
   /* USER CODE END 2 */
-
-  /* Init scheduler */
-  osKernelInitialize();
-
-  /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
-  /* USER CODE END RTOS_MUTEX */
-
-  /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
-  /* USER CODE END RTOS_SEMAPHORES */
-
-  /* USER CODE BEGIN RTOS_TIMERS */
-  /* start timers, add new ones, ... */
-  /* USER CODE END RTOS_TIMERS */
-
-  /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
-  /* USER CODE END RTOS_QUEUES */
-
-  /* Create the thread(s) */
-  /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
-
-  /* USER CODE BEGIN RTOS_THREADS */
-  comms_init();
-
-
-  LED_RGB_SET(LED_GREEN); // Green - happy
-
-  /* USER CODE END RTOS_THREADS */
-
-  /* USER CODE BEGIN RTOS_EVENTS */
-  /* add events, ... */
-  /* USER CODE END RTOS_EVENTS */
-
-  /* Start scheduler */
-  osKernelStart();
-
-  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -488,6 +568,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    comms_process();
+    telemetry_poll();
+    HAL_Delay(1);
   }
   /* USER CODE END 3 */
 }
@@ -1166,6 +1249,53 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * @brief TIM8 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM8_Init(void)
+{
+
+  /* USER CODE BEGIN TIM8_Init 0 */
+
+  /* USER CODE END TIM8_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM8_Init 1 */
+
+  /* USER CODE END TIM8_Init 1 */
+  htim8.Instance = TIM8;
+  htim8.Init.Prescaler = 12000-1;
+  htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim8.Init.Period = 2500-1;
+  htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim8.Init.RepetitionCounter = 0;
+  htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim8, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim8, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM8_Init 2 */
+
+  /* USER CODE END TIM8_Init 2 */
+
+}
+
+/**
   * @brief TIM12 Initialization Function
   * @param None
   * @retval None
@@ -1215,6 +1345,46 @@ static void MX_TIM12_Init(void)
   * @param None
   * @retval None
   */
+/**
+  * @brief TIM4 Initialization — 250 ms periodic telemetry tick
+  * @note  TIM4 is on APB1. With HCLK=120 MHz and APB1_DIV1,
+  *        the TIM4 clock is 120 MHz.
+  *        PSC=12000-1 => 10 kHz tick; ARR=2500-1 => 250 ms period.
+  */
+static void MX_TIM4_Init(void)
+{
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig      = {0};
+
+  __HAL_RCC_TIM4_CLK_ENABLE();
+
+  htim4.Instance               = TIM4;
+  htim4.Init.Prescaler         = 12000U - 1U;
+  htim4.Init.CounterMode       = TIM_COUNTERMODE_UP;
+  htim4.Init.Period            = 2500U - 1U;
+  htim4.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* Enable TIM4 update interrupt in NVIC */
+  HAL_NVIC_SetPriority(TIM4_IRQn, 10, 0);
+  HAL_NVIC_EnableIRQ(TIM4_IRQn);
+}
+
 static void MX_TIM15_Init(void)
 {
 
@@ -1315,10 +1485,10 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 5, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
   /* DMA1_Stream1_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 5, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 
 }
@@ -1349,9 +1519,6 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOE, nTRIG_Pin|TECDAC_SS_Pin|TA_CS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  // HAL_GPIO_WritePin(SYS_EN_GPIO_Port, SYS_EN_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, EE_CS_Pin|IO_EXP_RSTN_Pin|IND1_Pin|enSyncOUT_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
@@ -1380,12 +1547,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : SYS_EN_Pin SEED_CS_Pin OPT_CS_Pin */
-  GPIO_InitStruct.Pin = SEED_CS_Pin|OPT_CS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  /*Configure GPIO pin : SYS_EN_Pin */
+  GPIO_InitStruct.Pin = SYS_EN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(SYS_EN_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : EE_CS_Pin SCL_CFG_Pin IO_EXP_RSTN_Pin IND1_Pin
                            enSyncOUT_Pin */
@@ -1436,6 +1602,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(BRD_V1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : SEED_CS_Pin OPT_CS_Pin */
+  GPIO_InitStruct.Pin = SEED_CS_Pin|OPT_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* USER CODE END MX_GPIO_Init_2 */
@@ -1509,28 +1682,6 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
 
 /* USER CODE END 4 */
 
-/* USER CODE BEGIN Header_StartDefaultTask */
-/**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
-{
-  /* init code for USB_DEVICE */
-  MX_USB_DEVICE_Init();
-  /* USER CODE BEGIN 5 */
-  printf("USB started\r\n");
-  /* Infinite loop */
-
-  for(;;)
-  {
-	osDelay(5000);
-  }
-  /* USER CODE END 5 */
-}
-
  /* MPU Configuration */
 
 void MPU_Config(void)
@@ -1572,7 +1723,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* USER CODE BEGIN Callback 0 */
   if (htim->Instance == TIM4) {
-
+    comms_telemetry_tick();
   }
   if (htim->Instance == FSYNC_TIMER.Instance) {
     FSYNC_PeriodElapsedCallback(htim);
@@ -1639,11 +1790,14 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
 
-  LED_RGB_SET(LED_RED); // Red - error
-
   __disable_irq();
+  /* Flash blue LED ~500ms on/off to indicate an error state */
   while (1)
   {
+    LED_RGB_SET(LED_BLUE);
+    delay_ms(500);
+    LED_RGB_SET(LED_NONE);
+    delay_ms(500);
   }
   /* USER CODE END Error_Handler_Debug */
 }
