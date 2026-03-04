@@ -41,6 +41,7 @@
 #include "motion_config.h"
 #include "jsmn.h"
 #include "utils.h"
+#include "msg_queue.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -442,6 +443,9 @@ int main(void)
 
   // Init USB
   MX_USB_DEVICE_Init();
+  // Initialize message queue for system JSON messages
+  printf("Initialize message queue\r\n");
+  mq_init();
   
   // Load motion config and check for temp_trip in JSON
   const motion_cfg_t *cfg_ptr = motion_cfg_get();

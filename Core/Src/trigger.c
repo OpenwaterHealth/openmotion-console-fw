@@ -18,6 +18,7 @@
 Trigger_Config_t trigger_config = { 40, 1000, 250, 1000 };
 
 volatile uint8_t _usb_trigger_interlock = 0;
+volatile uint8_t _safety_trigger_interlock = 0;
 
 volatile uint32_t fsync_counter = 0;
 volatile uint32_t lsync_counter = 0;
@@ -148,6 +149,17 @@ void trigger_init(void)
 {
     usb_register_disconnect_callback(trigger_usb_disconnect_cb);
     usb_register_connect_callback(trigger_usb_connect_cb);
+}
+
+void Trigger_Safety_Disconnect(void)
+{
+    _safety_trigger_interlock = 1;
+    Trigger_Stop();
+}
+
+void Trigger_Safety_Clear(void)
+{
+    _safety_trigger_interlock = 0;
 }
 
 HAL_StatusTypeDef Trigger_SetConfig(const Trigger_Config_t *config) {

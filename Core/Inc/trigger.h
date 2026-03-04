@@ -37,6 +37,8 @@ HAL_StatusTypeDef Trigger_SetConfigFromJSON(char *jsonString, size_t str_len);
 HAL_StatusTypeDef Trigger_GetConfigToJSON(char *jsonString, size_t max_length);
 uint32_t get_lsync_pulse_count(void);
 uint32_t get_fsync_pulse_count(void);
+void Trigger_Safety_Disconnect(void);
+void Trigger_Safety_Clear(void);
 
 void FSYNC_DelayElapsedCallback(TIM_HandleTypeDef *htim);
 void LSYNC_DelayElapsedCallback(TIM_HandleTypeDef *htim);

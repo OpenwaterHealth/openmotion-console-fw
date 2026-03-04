@@ -18,6 +18,7 @@
 #include "max31875.h"
 #include "led_driver.h"
 #include "if_commands.h"
+#include "msg_queue.h"
 
 #include "lwrb.h"
 #include <math.h>
@@ -251,6 +252,9 @@ static inline float adc_to_voltage(uint16_t adc_code)
  * pushes a TelemetrySample into the ring buffer.  Oldest samples
  * are silently discarded if the consumer falls behind.
  */
+volatile uint32_t _trip_counter = 0;
+volatile bool _trip_set = false;
+
 void telemetry_poll(void)
 {
 	uint32_t now = HAL_GetTick();
@@ -296,8 +300,26 @@ void telemetry_poll(void)
 	sample.tec_status = HAL_GPIO_ReadPin(TEMPGD_GPIO_Port, TEMPGD_Pin)?false:true;  // active low
 
 	if(TEC_TRIP_VALUE != 0.0 && adc_to_voltage(sample.tec_adc[0])>TEC_TRIP_VALUE){
-		// error
+		// error		
+		_trip_counter = 0;
+		Trigger_Safety_Disconnect();
+		if(!_trip_set){
+			/* push a system error JSON message into the message queue */
+			const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"TEC trip point reached\"}";
+			if (!mq_push(msg, strlen(msg))) {
+				printf("Failed to push trip message to queue\r\n");
+			}
+		}
+		_trip_set = true;
 		printf("++++> ERROR TEC TRIP SET\r\n");
+		
+
+	}else{
+		_trip_counter++;
+		if(_trip_counter > 200 && _trip_set){
+			Trigger_Safety_Clear();
+			_trip_set = false;
+		}
 	}
 
 	/* --- end timed acquisition --- */
