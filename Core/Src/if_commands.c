@@ -61,6 +61,16 @@ static uint8_t tec_temp_good;
 static char retTriggerJson[0xFF];
 static float tec_setpoint = 0.0;
 
+static void printBufferAsArr(const uint8_t *buffer, uint32_t size)
+{
+	printf("[");
+	for (uint32_t i = 0; i < size; i++)
+	{
+		printf("%02X ", buffer[i]); // Print each byte in hexadecimal format
+	}
+	printf("]\r\n"); // Print a newline character to separate the output
+}
+
 static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
 {
     _Bool ret = true;
@@ -164,6 +174,8 @@ static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
                 uint8_t reg_addr = cmd->data[3];
                 uint8_t data_len = cmd->data[4];
                 uint8_t *pData = &cmd->data[5];
+                // printf("I2C Write MUX: %d CH: %d ADDR: 0x%02X REG: 0x%02X LEN: %d ", mux_index, channel, i2c_addr, reg_addr, data_len);                
+                // printBufferAsArr(pData, data_len);
                 int8_t ret = TCA9548A_Write_Data(mux_index, channel, i2c_addr, reg_addr, data_len, pData);
                 if (ret!= TCA9548A_OK) {
                     printf("error selecting channel\r\n");

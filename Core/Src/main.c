@@ -397,7 +397,7 @@ int main(void)
 
   //printf("I2C4\r\n");
   //I2C_scan(&hi2c4, NULL, 0, true);
-  TCA9548A_SelectChannel(0, 3);
+  TCA9548A_SelectChannel(0, 0); // seed config i2c
   I2C_scan(&hi2c1, NULL, 0, true);
 #endif
 
