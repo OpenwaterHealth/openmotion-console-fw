@@ -61,7 +61,7 @@ uint32_t MachXO_CmdXfer(MachXO_Handle_t *h,
 
     const uint16_t addr8 = MachXO_Addr8(h);
 	// printf("I2C Write MUX: %d CH: %d ADDR: 0x%02X \r\n", h->mux_idx, h->mux_ch, addr8);       
-	TCA9548A_SelectChannel(h->mux_idx, h->mux_ch);
+	if(TCA9548A_SelectChannel(h->mux_idx, h->mux_ch) != TCA9548A_OK) return ERROR;
     if (rcnt > 0) {
     	if(xi2c_write_and_read(h->hi2c, addr8, (uint8_t*)wbuf, (uint16_t)wcnt, rbuf, rcnt) != HAL_OK) {
     		return ERROR;

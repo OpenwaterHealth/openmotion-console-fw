@@ -253,15 +253,16 @@ _Bool process_fpga_prog_command(UartPacket *response, UartPacket *cmd)
          */
 
         /* Step 1 – send ISC_REFRESH opcode once */
+        delay_us(1000);
         const uint8_t refresh_cmd[4] = {0x79, 0x00, 0x00, 0x00};
         int rc = (int)MachXO_CmdXfer(xo2_prog_devp->pI2CDrvrCalls,
-                                     refresh_cmd, 4, NULL, 0);
+                                     refresh_cmd, 3, NULL, 0);
         if (rc != OK)
         {
             /* Could not even send the command – genuine error */
             printf("REFRESH: failed to send ISC_REFRESH\r\n");
             response->data_len = 0;
-            response->packet_type = OW_ERROR;
+            response->packet_type = OW_ERROR;          
             return OW_CODE_ERROR;
         }
 
