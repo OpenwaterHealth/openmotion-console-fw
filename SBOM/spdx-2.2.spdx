@@ -1,0 +1,45 @@
+SPDXVersion: SPDX-2.2
+DataLicense: CC0-1.0
+SPDXID: SPDXRef-DOCUMENT
+DocumentName: motion-console-fw SBOM
+DocumentNamespace: http://spdx.org/spdxdocs/motion-console-fw-2026-03-09
+Creator: Tool: GitHub Copilot
+Created: 2026-03-09T12:00:00Z
+
+##### Packages detected in repository (high-level)
+
+PackageName: motion-console-fw
+SPDXID: SPDXRef-Pkg-motion-console-fw
+PackageVersion: NOASSERTION
+PackageFileName: .
+PackageSupplier: NOASSERTION
+PackageDownloadLocation: NOASSERTION
+FilesAnalyzed: false
+PackageLicenseConcluded: NOASSERTION
+PackageLicenseDeclared: NOASSERTION
+
+PackageName: STM32H7xx_HAL_Driver
+SPDXID: SPDXRef-Pkg-STM32H7xx_HAL_Driver
+PackageVersion: NOASSERTION
+PackageFileName: Drivers/STM32H7xx_HAL_Driver
+PackageSupplier: NOASSERTION
+PackageDownloadLocation: NOASSERTION
+FilesAnalyzed: false
+PackageLicenseConcluded: NOASSERTION
+PackageLicenseDeclared: NOASSERTION
+
+PackageName: STM32_USB_Device_Library
+SPDXID: SPDXRef-Pkg-STM32_USB_Device_Library
+PackageVersion: NOASSERTION
+PackageFileName: Middlewares/ST/STM32_USB_Device_Library
+PackageSupplier: NOASSERTION
+PackageDownloadLocation: NOASSERTION
+FilesAnalyzed: false
+PackageLicenseConcluded: NOASSERTION
+PackageLicenseDeclared: NOASSERTION
+
+##### Notes
+- This SBOM is a lightweight, high-level inventory of third-party components found in the repository tree.
+- Fields marked NOASSERTION should be resolved by an automated SBOM tool (e.g., `syft` or `cyclonedx`) or by inspecting vendor license files.
+
+Generated-by-Tool: GitHub Copilot
