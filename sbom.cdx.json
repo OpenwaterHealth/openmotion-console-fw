@@ -1,0 +1,115 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.4",
+  "serialNumber": "urn:uuid:3d5f2c1a-8e8b-4b7c-9f2a-123456789abc",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-03-23T12:00:00Z",
+    "tools": [
+      {
+        "vendor": "OpenWater",
+        "name": "sbom-generator",
+        "version": "1.0"
+      }
+    ],
+    "component": {
+      "bom-ref": "openmotion-console-fw",
+      "type": "application",
+      "name": "openmotion-console-fw",
+      "version": "UNKNOWN",
+      "description": "Firmware for sensor module (medical device)"
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "openmotion-console-fw",
+      "type": "application",
+      "name": "openmotion-console-fw",
+      "version": "UNKNOWN",
+      "purl": "pkg:generic/openmotion-console-fw@UNKNOWN",
+      "licenses": [{ "license": { "id": "NOASSERTION" } }]
+    },
+    {
+      "bom-ref": "cmsis",
+      "type": "library",
+      "name": "CMSIS",
+      "version": "UNKNOWN",
+      "purl": "pkg:generic/cmsis@UNKNOWN",
+      "supplier": { "name": "ARM" },
+      "licenses": [{ "license": { "id": "NOASSERTION" } }]
+    },
+    {
+      "bom-ref": "stm32h7xx-hal-driver",
+      "type": "library",
+      "name": "STM32H7xx_HAL_Driver",
+      "version": "UNKNOWN",
+      "purl": "pkg:generic/stm32h7xx-hal-driver@UNKNOWN",
+      "supplier": { "name": "STMicroelectronics" },
+      "licenses": [{ "license": { "id": "NOASSERTION" } }]
+    },
+    {
+      "bom-ref": "stm32-usb-device-library",
+      "type": "library",
+      "name": "STM32_USB_Device_Library",
+      "version": "UNKNOWN",
+      "purl": "pkg:generic/stm32-usb-device-library@UNKNOWN",
+      "supplier": { "name": "STMicroelectronics" },
+      "licenses": [{ "license": { "id": "NOASSERTION" } }]
+    },
+    {
+      "bom-ref": "jsmn",
+      "type": "library",
+      "name": "jsmn",
+      "version": "UNKNOWN",
+      "purl": "pkg:generic/jsmn@UNKNOWN",
+      "licenses": [{ "license": { "id": "NOASSERTION" } }]
+    },
+    {
+      "bom-ref": "lwrb",
+      "type": "library",
+      "name": "lwrb",
+      "version": "UNKNOWN",
+      "purl": "pkg:generic/lwrb@UNKNOWN",
+      "licenses": [{ "license": { "id": "NOASSERTION" } }]
+    },
+    {
+      "bom-ref": "xo2-api",
+      "type": "library",
+      "name": "XO2_api",
+      "version": "UNKNOWN",
+      "purl": "pkg:generic/xo2-api@UNKNOWN",
+      "licenses": [{ "license": { "id": "NOASSERTION" } }]
+    },
+    {
+      "bom-ref": "ad5761r",
+      "type": "library",
+      "name": "ad5761r",
+      "version": "UNKNOWN",
+      "purl": "pkg:generic/ad5761r@UNKNOWN",
+      "licenses": [{ "license": { "id": "NOASSERTION" } }]
+    },
+    {
+      "bom-ref": "gcc-arm-none-eabi",
+      "type": "tool",
+      "name": "gcc-arm-none-eabi",
+      "version": "UNKNOWN",
+      "purl": "pkg:generic/gcc-arm-none-eabi@UNKNOWN",
+      "licenses": [{ "license": { "id": "NOASSERTION" } }]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "openmotion-console-fw",
+      "dependsOn": [
+        "cmsis",
+        "stm32h7xx-hal-driver",
+        "stm32-usb-device-library",
+        "jsmn",
+        "lwrb",
+        "xo2-api",
+        "ad5761r",
+        "gcc-arm-none-eabi"
+      ]
+    }
+  ]
+}
