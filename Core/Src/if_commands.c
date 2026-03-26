@@ -512,6 +512,9 @@ _Bool process_if_command(UartPacket *uartResp, UartPacket *cmd)
                     break;
                 }
 
+                // Apply updated config to runtime variables.
+                motion_cfg_apply_settings();
+
                 // Return the updated header as an ACK payload.
                 const uint8_t *wire_buf = NULL;
                 uint16_t wire_len = 0;

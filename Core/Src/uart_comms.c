@@ -297,11 +297,12 @@ void telemetry_poll(void)
 	sample.tec_adc[2] = tec_raw[2];
 	sample.tec_adc[3] = tec_raw[3];
 
-	sample.tec_status = HAL_GPIO_ReadPin(TEMPGD_GPIO_Port, TEMPGD_Pin)?false:true;  // active low
-
-	if(TEC_TRIP_VALUE != 0.0 && adc_to_voltage(sample.tec_adc[0])>TEC_TRIP_VALUE){
+	sample.tec_status = (HAL_GPIO_ReadPin(TEMPGD_GPIO_Port, TEMPGD_Pin) == GPIO_PIN_RESET); // active low
+	volatile float tec_volts = adc_to_voltage(sample.tec_adc[0]);
+	if(TEC_TRIP_VALUE != 0.0 && tec_volts > TEC_TRIP_VALUE){
 		// error		
 		_trip_counter = 0;
+		sample.tec_status = false;
 		Trigger_Safety_Disconnect();
 		if(!_trip_set){
 			/* push a system error JSON message into the message queue */
