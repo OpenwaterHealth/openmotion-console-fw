@@ -56,6 +56,9 @@ extern bool _enter_dfu;
 extern ad5761r_dev tec_dac;
 extern double TEC_TRIP_VALUE;
 
+volatile bool _tec_sample_lock = false;
+volatile TecStats last_tec_stats = {0};
+
 // Local helper used for sending
 void printUartPacket(const UartPacket* packet) {
 	if (!packet) {
@@ -207,6 +210,9 @@ NextDataPacket:
 	memset(rxBuffer, 0, sizeof(rxBuffer));
 	ptrReceive = 0;
 	rx_flag = 0;
+	if(_tec_sample_lock){
+        _tec_sample_lock = false;
+	}
 	// Restart reception
 	CDC_ReceiveToIdle(rxBuffer, COMMAND_MAX_SIZE);
 }
@@ -254,7 +260,6 @@ static inline float adc_to_voltage(uint16_t adc_code)
  */
 volatile uint32_t _trip_counter = 0;
 volatile bool _trip_set = false;
-
 void telemetry_poll(void)
 {
 	uint32_t now = HAL_GetTick();
@@ -269,6 +274,7 @@ void telemetry_poll(void)
 
 	TelemetrySample sample = {0};
 	sample.timestamp_ms = now;
+	sample.tec_status = true;
 
 	/* --- begin timed acquisition --- */
 	uint32_t dwt_start = DWT->CYCCNT;
@@ -297,11 +303,11 @@ void telemetry_poll(void)
 	sample.tec_adc[2] = tec_raw[2];
 	sample.tec_adc[3] = tec_raw[3];
 
-	sample.tec_status = HAL_GPIO_ReadPin(TEMPGD_GPIO_Port, TEMPGD_Pin)?false:true;  // active low
-
-	if(TEC_TRIP_VALUE != 0.0 && adc_to_voltage(sample.tec_adc[0])>TEC_TRIP_VALUE){
+	volatile float tec_volts = adc_to_voltage(sample.tec_adc[0]);
+	if(TEC_TRIP_VALUE != 0.0 && tec_volts > TEC_TRIP_VALUE){
 		// error		
 		_trip_counter = 0;
+		sample.tec_status = false;
 		Trigger_Safety_Disconnect();
 		if(!_trip_set){
 			/* push a system error JSON message into the message queue */
@@ -319,6 +325,9 @@ void telemetry_poll(void)
 		if(_trip_counter > 200 && _trip_set){
 			Trigger_Safety_Clear();
 			_trip_set = false;
+			sample.tec_status = true;
+		}else{
+			sample.tec_status = true;
 		}
 	}
 
@@ -331,6 +340,18 @@ void telemetry_poll(void)
 		lwrb_skip(&s_telemetry_rb, sizeof(TelemetrySample));
 	}
 	lwrb_write(&s_telemetry_rb, &sample, sizeof(TelemetrySample));
+	if(_tec_sample_lock){
+		// if the sample is being read by the command module, skip copying to the shared last_tec_stats
+		return;
+	}else{
+		last_tec_stats.timestamp_ms = sample.timestamp_ms;
+		last_tec_stats.vout         = adc_to_voltage(sample.tec_adc[0]);
+		last_tec_stats.temp_set     = adc_to_voltage(sample.tec_adc[1]);
+		last_tec_stats.tec_curr     = adc_to_voltage(sample.tec_adc[2]);
+		last_tec_stats.tec_volt     = adc_to_voltage(sample.tec_adc[3]);
+		last_tec_stats.tec_status   = sample.tec_status;	
+	}
+
 }
 
 void comms_init(void) {

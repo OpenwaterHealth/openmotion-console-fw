@@ -215,6 +215,104 @@ void delay_ms(uint32_t ms)
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+void motion_cfg_apply_settings(void)
+{
+    const char *json_str = motion_cfg_get_json_ptr();
+    if (json_str == NULL) { return; }
+
+    jsmn_parser parser;
+    jsmntok_t tokens[32];
+
+    jsmn_init(&parser, NULL);
+    int r = jsmn_parse(&parser, json_str, strlen(json_str), tokens, sizeof(tokens) / sizeof(tokens[0]), NULL);
+
+    if (r >= 1 && tokens[0].type == JSMN_OBJECT) {
+      for (int i = 1; i < r; i++) {
+        if (tokens[i].type != JSMN_STRING) {
+          continue;
+        }
+
+        int key_start = tokens[i].start;
+        int key_len = tokens[i].end - tokens[i].start;
+
+        i++;
+        if (i >= r) {
+          break;
+        }
+
+        if (tokens[i].type != JSMN_PRIMITIVE) {
+          continue;
+        }
+
+        int val_start = tokens[i].start;
+        int val_len = tokens[i].end - tokens[i].start;
+        char tmpval[64];
+        int copy_len = (val_len < (int)sizeof(tmpval) - 1) ? val_len : (int)sizeof(tmpval) - 1;
+        memcpy(tmpval, json_str + val_start, copy_len);
+        tmpval[copy_len] = '\0';
+
+        // TEC_TRIP (integer)
+        if (key_len == (int)strlen("TEC_TRIP") &&
+            strncmp(json_str + key_start, "TEC_TRIP", key_len) == 0) {
+          int TEC_TRIP = (int)strtoul(tmpval, NULL, 10);
+          printf("TEC_TRIP found: %d\r\n", TEC_TRIP);
+          double r_th = temperature_to_resistance((double)TEC_TRIP);
+          TEC_TRIP_VALUE = solve_v(r_th);
+          printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, TEC_TRIP_VALUE);
+          continue;
+        }
+
+        // OPT_GAIN
+        if ((key_len == (int)strlen("OPT_GAIN") &&
+             strncmp(json_str + key_start, "OPT_GAIN", key_len) == 0)) {
+          double v = strtod(tmpval, NULL);
+          OPT_GAIN_VALUE = v;
+          printf("OPT_GAIN_VALUE found: %.6f\r\n", OPT_GAIN_VALUE);
+          continue;
+        }
+
+        // OPT_THRESH
+        if ((key_len == (int)strlen("OPT_THRESH") &&
+             strncmp(json_str + key_start, "OPT_THRESH", key_len) == 0)) {
+          unsigned long v = strtoul(tmpval, NULL, 10);
+          OPT_THRESH_VALUE = (uint16_t)v;
+          printf("OPT_THRESH found: %u\r\n", (unsigned)OPT_THRESH_VALUE);
+
+          int8_t ret = TCA9548A_Write_Data(1, 7, 0x41, 0x10, 2, (uint8_t*)&OPT_THRESH_VALUE);
+          if (ret != TCA9548A_OK) {
+              printf("ERROR setting OPT_THRESH_VALUE\r\n");
+          }
+          continue;
+        }
+
+        // EE_GAIN
+        if ((key_len == (int)strlen("EE_GAIN") &&
+             strncmp(json_str + key_start, "EE_GAIN", key_len) == 0)) {
+          double v = strtod(tmpval, NULL);
+          EE_GAIN_VALUE = v;
+          printf("EE_GAIN_VALUE found: %.6f\r\n", EE_GAIN_VALUE);
+          continue;
+        }
+
+        // EE_THRESH
+        if ((key_len == (int)strlen("EE_THRESH") &&
+             strncmp(json_str + key_start, "EE_THRESH", key_len) == 0)) {
+          unsigned long v = strtoul(tmpval, NULL, 10);
+          EE_THRESH_VALUE = (uint16_t)v;
+          printf("EE_THRESH found: %u\r\n", (unsigned)EE_THRESH_VALUE);
+
+          int8_t ret = TCA9548A_Write_Data(1, 6, 0x41, 0x10, 2, (uint8_t*)&EE_THRESH_VALUE);
+          if (ret != TCA9548A_OK) {
+              printf("ERROR setting EE_THRESH_VALUE\r\n");
+          }
+          continue;
+        }
+      }
+    } else {
+      printf("Failed to parse JSON or no object found\n");
+    }
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -447,107 +545,9 @@ int main(void)
   printf("Initialize message queue\r\n");
   mq_init();
   
-  // Load motion config and check for temp_trip in JSON
-  const motion_cfg_t *cfg_ptr = motion_cfg_get();
-  if (cfg_ptr) {
-    const char *json_str = motion_cfg_get_json_ptr();
-
-    jsmn_parser parser;
-    jsmntok_t tokens[32];
-
-    jsmn_init(&parser, NULL);
-    int r = jsmn_parse(&parser, json_str, strlen(json_str), tokens, sizeof(tokens) / sizeof(tokens[0]), NULL);
-
-    if (r >= 1 && tokens[0].type == JSMN_OBJECT) {
-      for (int i = 1; i < r; i++) {
-        if (tokens[i].type != JSMN_STRING) {
-          continue;
-        }
-
-        int key_start = tokens[i].start;
-        int key_len = tokens[i].end - tokens[i].start;
-
-        // Advance to the value token
-        i++;
-        if (i >= r) {
-          break;
-        }
-
-        // Helper to copy primitive text into a NUL-terminated buffer
-        if (tokens[i].type != JSMN_PRIMITIVE) {
-          continue;
-        }
-
-        int val_start = tokens[i].start;
-        int val_len = tokens[i].end - tokens[i].start;
-        char tmpval[64];
-        int copy_len = (val_len < (int)sizeof(tmpval) - 1) ? val_len : (int)sizeof(tmpval) - 1;
-        memcpy(tmpval, json_str + val_start, copy_len);
-        tmpval[copy_len] = '\0';
-
-        // TEC_TRIP (integer)
-        if (key_len == (int)strlen("TEC_TRIP") &&
-            strncmp(json_str + key_start, "TEC_TRIP", key_len) == 0) {
-          int TEC_TRIP = (int)strtoul(tmpval, NULL, 10);
-          printf("TEC_TRIP found: %d\r\n", TEC_TRIP);
-          double r_th = temperature_to_resistance((double)TEC_TRIP);
-          TEC_TRIP_VALUE = solve_v(r_th);
-          printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, TEC_TRIP_VALUE);
-          continue;
-        }
-
-        // OPT_GAIN
-        if ((key_len == (int)strlen("OPT_GAIN") &&
-             strncmp(json_str + key_start, "OPT_GAIN", key_len) == 0)) {
-          double v = strtod(tmpval, NULL);
-          OPT_GAIN_VALUE = v;
-          printf("OPT_GAIN_VALUE found: %.6f\r\n", OPT_GAIN_VALUE);
-          continue;
-        }
-
-        // OPT_THRESH
-        if ((key_len == (int)strlen("OPT_THRESH") &&
-             strncmp(json_str + key_start, "OPT_THRESH", key_len) == 0)) {
-          unsigned long v = strtoul(tmpval, NULL, 10);
-          OPT_THRESH_VALUE = (uint16_t)v;
-          printf("OPT_THRESH found: %u\r\n", (unsigned)OPT_THRESH_VALUE);
-          
-          int8_t ret = TCA9548A_Write_Data(1, 7, 0x41, 0x10, 2, (uint8_t*)&OPT_THRESH_VALUE);
-          if (ret!= TCA9548A_OK) {
-              printf("ERROR setting OPT_THRESH_VALUE\r\n");
-          }
-
-          continue;
-        }
-
-        // EE_GAIN
-        if ((key_len == (int)strlen("EE_GAIN") &&
-             strncmp(json_str + key_start, "EE_GAIN", key_len) == 0)) {
-          double v = strtod(tmpval, NULL);
-          EE_GAIN_VALUE = v;
-          printf("EE_GAIN_VALUE found: %.6f\r\n", EE_GAIN_VALUE);
-          continue;
-        }
-
-        // EE_THRESH
-        if ((key_len == (int)strlen("EE_THRESH") &&
-             strncmp(json_str + key_start, "EE_THRESH", key_len) == 0)) {
-          unsigned long v = strtoul(tmpval, NULL, 10);
-          EE_THRESH_VALUE = (uint16_t)v;
-          printf("EE_THRESH found: %u\r\n", (unsigned)EE_THRESH_VALUE);
-
-          int8_t ret = TCA9548A_Write_Data(1, 6, 0x41, 0x10, 2, (uint8_t*)&EE_THRESH_VALUE);
-          if (ret!= TCA9548A_OK) {
-              printf("ERROR setting EE_THRESH_VALUE\r\n");
-          }
-
-          continue;
-        }
-      }
-    } else {
-      printf("Failed to parse JSON or no object found\n");
-    }
-  }
+  // Load motion config and apply settings
+  motion_cfg_get();
+  motion_cfg_apply_settings();
 
   HAL_Delay(100);
 
