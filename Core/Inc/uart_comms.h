@@ -39,6 +39,15 @@ typedef struct __attribute__((packed)) {
     bool     tec_status;     /* TEC Status */
 } TelemetrySample;
 
+typedef struct __attribute__((packed)) {
+    uint32_t timestamp_ms;   /*!< HAL_GetTick() at capture time */
+    float    vout;           
+    float    temp_set;        
+    float    tec_curr;        
+    float    tec_volt;     
+    bool     tec_status;     /* TEC Status */
+} TecStats;
+
 /* ---------------------------------------------------------------------------
  * Public API
  * ---------------------------------------------------------------------------*/

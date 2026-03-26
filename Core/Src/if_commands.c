@@ -57,19 +57,13 @@ static uint32_t last_lsync_count = 0;
 
 static float tecadc_last_volts[4];
 static uint16_t tecadc_last_raw[4];
-static uint8_t tec_temp_good;
+
 static char retTriggerJson[0xFF];
 static float tec_setpoint = 0.0;
 
-static void printBufferAsArr(const uint8_t *buffer, uint32_t size)
-{
-	printf("[");
-	for (uint32_t i = 0; i < size; i++)
-	{
-		printf("%02X ", buffer[i]); // Print each byte in hexadecimal format
-	}
-	printf("]\r\n"); // Print a newline character to separate the output
-}
+extern volatile bool _trip_set;
+extern volatile bool _tec_sample_lock;
+extern volatile TecStats last_tec_stats;
 
 static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
 {
@@ -325,13 +319,15 @@ static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
 
             break;
         case OW_CTRL_TEC_STATUS:
-            uartResp->command = OW_CTRL_TECADC;
+            uartResp->command = OW_CTRL_TEC_STATUS;
             uartResp->addr = cmd->addr;
             uartResp->reserved = cmd->reserved;
 
-            tec_temp_good = HAL_GPIO_ReadPin(TEMPGD_GPIO_Port, TEMPGD_Pin)?0:1;
-            uartResp->data_len = 1;
-            uartResp->data = &tec_temp_good;
+            _tec_sample_lock = true;
+
+            uartResp->data_len = sizeof(last_tec_stats);
+            uartResp->data = (uint8_t *)&last_tec_stats;
+
             break;
         case OW_CTRL_TECADC:
             uartResp->command = OW_CTRL_TECADC;
