@@ -29,12 +29,12 @@ permissions:
 #                      the openmotion-bl secret of the same name. The CBC crypto
 #                      scheme's sign step requires it (sign_firmware.py --aes-key).
 #
-#   BL_REPO_TOKEN      PAT / fine-grained token with *read* access to
-#                      OpenwaterHealth/openmotion-bl (contents + releases). Needed
-#                      only because that repo is private: used to check out
-#                      py-tools/sign_firmware.py and to download the bootloader
-#                      release binary. Falls back to GITHUB_TOKEN if the bl repo is
-#                      made public.
+#   (No token is needed for OpenwaterHealth/open-motion-console-bl access —
+#   the repo is public, so the built-in github.token covers the py-tools
+#   checkout and the bootloader release download. #55: the old BL_REPO_TOKEN
+#   PAT dated from when that repo was private; when it expired it 401'd every
+#   build. If the bl repo ever goes private again, restore a read-access
+#   cross-repo credential at the three github.token sites below.)
 #
 # These keys already exist in openmotion-bl (public key committed there; private
 # + AES keys are the working-tree key material). Reuse the SAME keypair — a new
@@ -53,20 +53,21 @@ jobs:
           fetch-tags: true
 
       # Fail fast (before the minutes-long builds) with a clear message if any
-      # signing/bootloader secret is missing, instead of the cryptic
-      # "set the GH_TOKEN environment variable" error deep in the run.
+      # signing secret is missing, instead of a cryptic error deep in the run.
+      # (#55: open-motion-console-bl access needs no secret — the repo is
+      # public, so the workflow's own github.token covers the release lookup,
+      # the py-tools checkout, and the binary download. If that repo ever goes
+      # private, those three steps need a cross-repo credential again.)
       - name: Check required secrets
         env:
           FW_SIGNING_KEY: ${{ secrets.FW_SIGNING_KEY }}
           SECOREBIN_AES_KEY: ${{ secrets.SECOREBIN_AES_KEY }}
-          BL_REPO_TOKEN: ${{ secrets.BL_REPO_TOKEN }}
         run: |
           missing=0
-          for v in FW_SIGNING_KEY SECOREBIN_AES_KEY BL_REPO_TOKEN; do
+          for v in FW_SIGNING_KEY SECOREBIN_AES_KEY; do
             if [ -z "${!v}" ]; then
               echo "::error::Required secret '$v' is not set. Add it under" \
-                   "Settings -> Secrets and variables -> Actions. BL_REPO_TOKEN" \
-                   "must be a PAT with read access to OpenwaterHealth/open-motion-console-bl."
+                   "Settings -> Secrets and variables -> Actions."
               missing=1
             fi
           done
@@ -146,10 +147,15 @@ jobs:
       # Resolve which openmotion-bl release to bundle. Uses the workflow_dispatch
       # input when given, otherwise the latest published bootloader release.
       # ---------------------------
+      # #55: open-motion-console-bl is public — the built-in github.token is
+      # enough for gh here (gh refuses to run tokenless in Actions, but any
+      # valid token reads public releases). A dedicated PAT would only be
+      # needed again if that repo goes private, and an EXPIRED one is worse
+      # than none: GitHub 401s bad credentials even on public endpoints.
       - name: Resolve openmotion-bl release tag
         id: bl
         env:
-          GH_TOKEN: ${{ secrets.BL_REPO_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           REQ="${{ github.event.inputs.bl_release }}"
@@ -168,13 +174,13 @@ jobs:
         with:
           repository: OpenwaterHealth/open-motion-console-bl
           ref: ${{ steps.bl.outputs.tag }}
-          token: ${{ secrets.BL_REPO_TOKEN }}
+          token: ${{ github.token }}
           path: _bl
           sparse-checkout: py-tools
 
       - name: Download bootloader binary from openmotion-bl release
         env:
-          GH_TOKEN: ${{ secrets.BL_REPO_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p _artifacts
