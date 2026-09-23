@@ -114,7 +114,10 @@ static uint16_t fan_measure_rpm(uint8_t index)
         rpm = 0xFFFFU;
     return (uint16_t)rpm;
 }
-static uint32_t id_words[3] = {0};
+/* OW_CMD_HWID reply: 96-bit UID in words 0-2, word 3 is constant zero
+ * padding. The reply is 16 bytes, so the array must be too — a 3-word
+ * array leaked the adjacent static into bytes 12-15 (#53). */
+static uint32_t id_words[4] = {0};
 
 /* OW_CMD_BOOT_INFO reply. Reports the RUNTIME vector-table base (SCB->VTOR),
  * not the compile-time BARE_METAL_BUILD flag, so the device evidences where it
@@ -644,7 +647,8 @@ _Bool process_if_command(UartPacket *uartResp, UartPacket *cmd)
             id_words[0] = HAL_GetUIDw0();
             id_words[1] = HAL_GetUIDw1();
             id_words[2] = HAL_GetUIDw2();
-            uartResp->data_len = 16;
+            id_words[3] = 0u;
+            uartResp->data_len = sizeof(id_words);
             uartResp->data = (uint8_t *)&id_words;
             break;
         case OW_CMD_BOOT_INFO:
