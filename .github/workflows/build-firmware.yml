@@ -205,7 +205,7 @@ jobs:
             echo "::error::FW_SIGNING_KEY and SECOREBIN_AES_KEY secrets must be set to sign the slot image." >&2
             exit 1
           fi
-          python3 -m pip install --quiet 'cryptography>=41'
+          python3 -m pip install --quiet 'cryptography==50.0.1'
           KD="$(mktemp -d)"
           trap 'rm -rf "$KD"' EXIT
           printf '%s\n' "$FW_SIGNING_KEY" > "$KD/ecdsa_private.pem"
