@@ -177,8 +177,6 @@ Examples include:
 | `OW_CTRL_GET_FSYNC`  | Read frame sync (FSYNC) status          |
 | `OW_CTRL_GET_LSYNC`  | Read line sync (LSYNC) status           |
 | `OW_CTRL_TEC_DAC`    | Set TEC control DAC output              |
-| `OW_CTRL_READ_ADC`   | Read ADC channel value                  |
-| `OW_CTRL_READ_GPIO`  | Read GPIO pin state                     |
 | `OW_CTRL_GET_TEMPS`  | Read temperature sensor values          |
 | `OW_CTRL_TECADC`     | Read TEC-related ADC measurements       |
 | `OW_CTRL_TEC_STATUS` | Read TEC controller status and faults   |

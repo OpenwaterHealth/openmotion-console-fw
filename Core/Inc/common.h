@@ -103,8 +103,9 @@ typedef enum {
 	OW_CTRL_GET_FSYNC = 0x1B,
 	OW_CTRL_GET_LSYNC = 0x1C,
 	OW_CTRL_TEC_DAC = 0x1D,
-	OW_CTRL_READ_ADC = 0x1E,
-	OW_CTRL_READ_GPIO = 0x1F,
+	/* 0x1E, 0x1F retired (were OW_CTRL_READ_ADC / OW_CTRL_READ_GPIO, never
+	 * implemented; issue #12). Use OW_CTRL_TECADC, OW_CTRL_PDUMON or
+	 * OW_CTRL_BOARDID for the console's ADC and GPIO inputs. */
 	OW_CTRL_GET_TEMPS = 0x20,
 	OW_CTRL_TECADC = 0x21,
 	OW_CTRL_TEC_STATUS = 0x22,
