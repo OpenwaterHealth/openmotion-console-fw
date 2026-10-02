@@ -341,7 +341,9 @@ static void tec_trip_evaluate(TelemetrySample *sample)
  * Firmware is NOT the safety guarantee. Mirrors the TEC-trip pattern, but with
  * an explicit (not auto-timeout) recovery: the latch clears only once the FPGA
  * STATUS reads clean again (i.e. the operator cleared the fault), and
- * Trigger_Start stays blocked until then. Extracted from telemetry_poll to keep
+ * Trigger_Start stays blocked until then. While latched, the status LED blinks
+ * blue (fault indication) whatever the trigger state, including a fault
+ * already present at connect. Extracted from telemetry_poll to keep
  * that function under the IEC 62304 complexity threshold.
  */
 static void laser_safety_poll(void)
@@ -369,6 +371,9 @@ static void laser_safety_poll(void)
 			_laser_safety_trip_set = false;
 		}
 	}
+	/* Driven every poll, not only after a good read, so the blink keeps time
+	 * through a transient I2C miss. */
+	LED_Fault_Indicate(_laser_safety_trip_set, HAL_GetTick());
 }
 
 void telemetry_poll(void)
