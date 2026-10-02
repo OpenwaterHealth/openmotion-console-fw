@@ -318,7 +318,7 @@ HAL_StatusTypeDef Trigger_Start() {
         return HAL_ERROR; // Handle error
 	}
 
-	LED_RGB_SET(LED_BLUE); // trigger/laser active
+	LED_Indicator_Set(LED_BLUE); // trigger/laser active
     return HAL_OK;
 }
 
@@ -344,8 +344,10 @@ HAL_StatusTypeDef Trigger_Stop() {
 	/* Return the indicator to idle on EVERY stop path — STOP_TRIG command,
 	 * USB disconnect, host VCP close (PORT_CLOSE), and the TEC safety trip —
 	 * so the console shows idle (green) whenever the laser is actually
-	 * stopped. LED_RGB_SET is pure GPIO, safe from the USB ISR context. */
-	LED_RGB_SET(LED_GREEN); // idle
+	 * stopped. Pure GPIO, safe from the USB ISR context. Not applied while a
+	 * laser-safety fault is latched: the trip stops the trigger on every
+	 * telemetry poll, and an idle green here would mask the fault blink. */
+	LED_Indicator_Set(LED_GREEN); // idle
     return HAL_OK;
 }
 
