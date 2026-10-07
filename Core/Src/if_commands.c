@@ -203,7 +203,9 @@ static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
         }
         else
         {
-            LED_RGB_SET(cmd->reserved);
+            /* Acknowledged but not applied while a laser-safety fault is
+             * latched: the fault blink owns the LED until the latch clears. */
+            LED_Indicator_Set(cmd->reserved);
         }
         break;
     case OW_CTRL_GET_IND:
