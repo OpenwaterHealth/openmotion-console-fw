@@ -171,7 +171,7 @@ jobs:
           echo "**Build Time:** ${{ steps.buildmeta.outputs.datetime }}" >> notes.md
           echo "**Build Config:** ${{ steps.cfg.outputs.config }}" >> notes.md
           echo "" >> notes.md
-          echo "Developer build: images are **unsigned**; bare-metal images are workflow artifacts only (not published, CVA R10). Factory and field-update images for this tag come from the manual *Clinical build* workflow." >> notes.md
+          echo "Developer build: all images here are **unsigned** (bare-metal and slot). Signed field-update images and the factory production image for this tag come from the manual *Clinical build* workflow and are not published here." >> notes.md
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -183,8 +183,12 @@ jobs:
           body_path: notes.md
           overwrite_files: true
           make_latest: ${{ steps.reltype.outputs.prerelease == 'false' }}
-          # Bare-metal images are NOT release assets (CVA R10): an unsigned image that runs at
-          # 0x08000000 installs through the STM32 ROM loader with no signature check. Developers
-          # get them from the run's workflow artifacts.
+          # Release assets: the unsigned bare-metal image(s) and the unsigned slot image
+          # (decision 2026-10-08: bare-metal builds stay public; the application side of
+          # CVA R10 - signed-only installs in clinical builds - is handled in the SDK).
+          # Signed and production images are never here; they come from the clinical build
+          # and live only in the private bucket.
           files: |
+            _artifacts/motion-console-fw-baremetal.bin
+            _artifacts/motion-console-fw-baremetal.hex
             _artifacts/motion-console-fw-slot-unsigned.bin
