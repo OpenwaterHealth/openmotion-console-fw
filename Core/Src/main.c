@@ -438,6 +438,24 @@ int main(void)
   MX_IWDG1_Init();
   /* USER CODE BEGIN 2 */
 
+#if !defined(DEBUG) && !defined(BARE_METAL_BUILD)
+  /* Debug port stays closed (PTR-2026-1-5 CON-02, CVE-1191). The secure bootloader
+   * reconfigures PA13/PA14 (SWDIO/SWCLK) as plain inputs before launching us (DAP
+   * lock). Nothing in this application touches those pins, but assert the state
+   * here too so that a bootloader without the lock, or a future GPIO change, can
+   * never leave the probe interface live on a Release unit. Analog mode: no
+   * input buffer, no pull, lowest leakage. Debug builds keep SWD for development;
+   * bare-metal builds have no bootloader in front of them and are not fielded. */
+  {
+    GPIO_InitTypeDef swd = {0};
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    swd.Pin  = GPIO_PIN_13 | GPIO_PIN_14;
+    swd.Mode = GPIO_MODE_ANALOG;
+    swd.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &swd);
+  }
+#endif
+
   init_dma_logging();
 
   DWT_Init();

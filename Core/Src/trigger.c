@@ -90,6 +90,14 @@ static int jsonToTriggerConfigData(const char *jsonString, Trigger_Config_t* new
     }
 
     for (i = 1; i < r; i++) {
+        /* Every recognised key reads its value from t[i + 1]. A JSON object whose
+         * last token is a recognised key would otherwise read one token past the
+         * parsed set (uninitialised stack, or past the end of t[] when all 32 are
+         * used) and use it as an offset into the input (CVA O8 / R7). The input
+         * arrives over USB from the host. */
+        if (i + 1 >= r) {
+            break;
+        }
         if (jsoneq(jsonString, &t[i], "TriggerFrequencyHz") == 0) {
             newConfig->frequencyHz = strtof(jsonString + t[i + 1].start, NULL);
             i++;

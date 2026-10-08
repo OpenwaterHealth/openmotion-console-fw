@@ -262,7 +262,10 @@ jsmnerr_t jsmn_parse(jsmn_parser *parser, const char *js, size_t len,
                 parser->toksuper = parser->toknext - 1;
                 break;
             case ',':
-                if (tokens != NULL &&
+                /* toksuper is -1 for a comma at the top level; indexing
+                 * tokens[-1] read one token before the array (upstream jsmn
+                 * fix 824d9a7, "applied fix from wireshark"; CVA O9 / R7). */
+                if (tokens != NULL && parser->toksuper != -1 &&
                         tokens[parser->toksuper].type != JSMN_ARRAY &&
                         tokens[parser->toksuper].type != JSMN_OBJECT) {
 #ifdef JSMN_PARENT_LINKS
@@ -285,7 +288,7 @@ jsmnerr_t jsmn_parse(jsmn_parser *parser, const char *js, size_t len,
             case '5': case '6': case '7' : case '8': case '9':
             case 't': case 'f': case 'n' :
                 /* And they must not be keys of the object */
-                if (tokens != NULL) {
+                if (tokens != NULL && parser->toksuper != -1) {
                     jsmntok_t *t = &tokens[parser->toksuper];
                     if (t->type == JSMN_OBJECT ||
                             (t->type == JSMN_STRING && t->size != 0)) {
