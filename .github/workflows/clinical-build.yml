@@ -1,0 +1,345 @@
+name: Clinical build
+
+# ---------------------------------------------------------------------------
+# Manual, approval-gated PRODUCTION build. Run it ON THE RELEASE TAG:
+#
+#   gh workflow run clinical-build.yml --ref 1.9.0
+#   (or Actions -> Clinical build -> Run workflow -> "Use workflow from: Tags / 1.9.0")
+#
+# Produces, for that tag:
+#   openmotion-console-fw-<tag>-production.bin / .hex   bootloader + signed application.
+#                                                       Factory image: flash at 0x08000000
+#                                                       onto a blank MCU.
+#   openmotion-console-fw-<tag>-signed.bin              signed application only, for field
+#                                                       update over USB DFU (flash_firmware.py).
+#   SHA256SUMS, clinical-build-manifest.json
+#
+# and stores them ONLY as an immutable copy in
+# gs://openwater-firmware-artifacts/openmotion-console-fw/<tag>/ (7-year retention). Nothing is
+# attached to the public GitHub Release or kept as a workflow artifact; the release gets a
+# "Clinical build" notes section with the hashes and the bucket path.
+#
+# Identity: the job runs in the "clinical" GitHub environment (required reviewer,
+# tags-only deployment policy). Google Cloud Workload Identity Federation accepts
+# this repository's OIDC token for the signer account only when that environment
+# claim is present, so THIS IS THE ONLY WORKFLOW THAT CAN SIGN with the console
+# key in Cloud KMS. build-firmware.yml has no Google identity and produces
+# unsigned images. No secret of any kind is stored in this repository.
+#
+# The bootloader/key pairing is explicit: BL_RELEASE must be a bootloader built
+# with the public half of KMS_KEY. verify_firmware.py checks the signed image
+# against that bootloader's committed public key before the production image is
+# assembled, so a mismatch fails here, not on a device.
+#
+# Setup and operations: OpenwaterHealth/OpenWater-KMS, docs/RUNBOOK-kms-signing-setup.md.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      bl_release:
+        description: "Bootloader release tag to bundle (default: BL_RELEASE pinned in this file)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  PRODUCT: motion-console-fw          # CMake target name (build output)
+  OUT: openmotion-console-fw          # artifact name prefix: <repo>-<tag>-signed.bin, <repo>-<tag>-production.{bin,hex}
+  BL_REPO: open-motion-console-bl
+  # Bootloader release to bundle (the workflow_dispatch input overrides it). Must
+  # be a tag whose binaries exist in the artifact bucket under open-motion-console-bl/<tag>/.
+  BL_RELEASE: "1.2.0-rc.1"
+  GCS_BUCKET: openwater-firmware-artifacts
+  WIF_PROVIDER: projects/341318872140/locations/global/workloadIdentityPools/github/providers/github-oidc
+  READER_SA: sa-fw-artifact-reader@openwater-cloud.iam.gserviceaccount.com
+  SIGNER_SA: sa-console-fw-signer@openwater-cloud.iam.gserviceaccount.com
+  UPLOADER_SA: sa-bl-artifact-uploader@openwater-cloud.iam.gserviceaccount.com
+  KMS_KEY: projects/openwater-cloud/locations/us-central1/keyRings/openmotion-firmware/cryptoKeys/console-fw-signing/cryptoKeyVersions/1
+
+jobs:
+  clinical:
+    runs-on: ubuntu-latest
+    environment: clinical
+
+    steps:
+      - name: Require a clinical release tag
+        run: |
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            echo "::error::Run this workflow on a release tag (gh workflow run clinical-build.yml --ref <tag>), not on '$GITHUB_REF_NAME'." >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_REF_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::'$GITHUB_REF_NAME' is not a clinical release tag (X.Y.Z or X.Y.Z-rc.N). *-dev.* tags are not eligible." >&2
+            exit 1
+          fi
+          echo "Clinical build of $GITHUB_REF_NAME requested by $GITHUB_ACTOR"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # ---------------------------
+      # FwVersion is a uint16 consumed by the bootloader's monotonic anti-rollback
+      # floor: X.Y.Z -> X*10000 + Y*100 + Z (max 6.55.35). A unit that has booted
+      # version N refuses any image < N until re-flashed. Keep releases monotonic.
+      # ---------------------------
+      - name: Compute signing FW version
+        id: fwver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          [[ "$TAG" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]
+          V=$(( ${BASH_REMATCH[1]}*10000 + ${BASH_REMATCH[2]}*100 + ${BASH_REMATCH[3]} ))
+          if [ "$V" -lt 1 ] || [ "$V" -gt 65535 ]; then
+            echo "::error::FwVersion $V out of range for tag $TAG" >&2; exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Signing FwVersion: $V"
+
+      - name: Pull build image
+        run: docker pull ghcr.io/openwaterhealth/stm32-build-env:latest
+
+      # Slot image: runs under the bootloader from the active slot (linked at
+      # 0x08020400). Release configuration only. This is the image that gets signed.
+      - name: Build slot image (Release, @0x08020400)
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE":/workspace \
+            -w /workspace \
+            ghcr.io/openwaterhealth/stm32-build-env:latest \
+            bash -lc "git config --global --add safe.directory /workspace && cmake --preset Release && cmake --build build/Release --config Release --target all -j 10"
+          test -s "build/Release/${PRODUCT}.bin"
+
+      - name: Resolve bootloader release tag
+        id: bl
+        run: |
+          set -euo pipefail
+          REQ="${{ github.event.inputs.bl_release }}"
+          TAG="${REQ:-$BL_RELEASE}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Bundling ${BL_REPO} @ $TAG"
+
+      # Signing tool + the public key the bootloader trusts, from the SAME pinned
+      # bootloader version, so the image format and the key always match.
+      - name: Fetch signing tool from the bootloader repository
+        uses: actions/checkout@v4
+        with:
+          repository: OpenwaterHealth/${{ env.BL_REPO }}
+          ref: ${{ steps.bl.outputs.tag }}
+          token: ${{ github.token }}
+          path: _bl
+          sparse-checkout: py-tools
+
+      - name: Fingerprint the bootloader's trusted public key
+        id: pubkey
+        run: |
+          FP=$(openssl pkey -pubin -in _bl/py-tools/keys/ecdsa_public.pem -outform DER | openssl dgst -sha256 | awk '{print $2}')
+          echo "fingerprint=$FP" >> "$GITHUB_OUTPUT"
+          echo "Bootloader ${{ steps.bl.outputs.tag }} trusts key sha256:$FP"
+
+      # ---------------------------
+      # Bootloader binary from the private artifact bucket.
+      # ---------------------------
+      - name: Authenticate to Google Cloud (artifact reader)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.READER_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download bootloader binary from the artifact bucket
+        id: bldl
+        run: |
+          set -euo pipefail
+          mkdir -p _artifacts _bl_bin
+          SRC="gs://${GCS_BUCKET}/${BL_REPO}/${{ steps.bl.outputs.tag }}"
+          BLNAME="${BL_REPO}-${{ steps.bl.outputs.tag }}"
+          gcloud storage cp "$SRC/$BLNAME.bin" "$SRC/SHA256SUMS" _bl_bin/
+          ( cd _bl_bin && sha256sum --check --ignore-missing SHA256SUMS )
+          cp "_bl_bin/$BLNAME.bin" _bl_bin/openmotion-bl.bin
+          echo "sha256=$(sha256sum _bl_bin/openmotion-bl.bin | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------
+      # Sign with the console key in Google Cloud KMS. The private key never
+      # leaves the HSM: sign_firmware.py sends the header digest, verifies the
+      # returned signature against the KMS public key, then verify_firmware.py
+      # checks the image against the public key committed in the bootloader being
+      # bundled. Every KMS signature is audit-logged with the requesting identity.
+      # ---------------------------
+      - name: Authenticate to Google Cloud (signer)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.SIGNER_SA }}
+
+      - name: Sign the slot image (Cloud KMS)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --disable-pip-version-check -r _bl/py-tools/requirements.txt
+          TAG="${GITHUB_REF_NAME}"
+          python3 _bl/py-tools/sign_firmware.py \
+            --firmware "build/Release/${PRODUCT}.bin" \
+            --kms-key "$KMS_KEY" \
+            --version "${{ steps.fwver.outputs.version }}" \
+            --output "_artifacts/${OUT}-${TAG}-signed.bin"
+          python3 _bl/py-tools/verify_firmware.py "_artifacts/${OUT}-${TAG}-signed.bin" \
+            --public-key _bl/py-tools/keys/ecdsa_public.pem
+
+      # ---------------------------
+      # Production image = bootloader (@0x08000000) + signed app (@0x08020000),
+      # one image for factory programming of a blank MCU.
+      # ---------------------------
+      - name: Assemble production image (bootloader + signed app)
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          python3 - "$OUT" "$TAG" <<'PY'
+          import sys
+          prefix, tag = sys.argv[1], sys.argv[2]
+          BL  = "_bl_bin/openmotion-bl.bin"
+          APP = f"_artifacts/{prefix}-{tag}-signed.bin"
+          OUT = f"_artifacts/{prefix}-{tag}-production.bin"
+          SLOT_OFFSET = 0x08020000 - 0x08000000   # 0x20000: the bootloader occupies sector 0
+          bl  = open(BL, "rb").read()
+          app = open(APP, "rb").read()
+          if len(bl) > SLOT_OFFSET:
+              raise SystemExit(f"bootloader ({len(bl)} B) overlaps the app slot at 0x{SLOT_OFFSET:x}")
+          img = bytearray(b"\xff" * SLOT_OFFSET)
+          img[:len(bl)] = bl
+          img += app
+          open(OUT, "wb").write(img)
+          print(f"production image: {OUT} {len(img)} bytes (bootloader={len(bl)} B, signed app={len(app)} B)")
+          PY
+          BASE="${OUT}-${TAG}-production"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE":/workspace \
+            -w /workspace \
+            ghcr.io/openwaterhealth/stm32-build-env:latest \
+            bash -lc "arm-none-eabi-objcopy -I binary -O ihex --change-addresses=0x08000000 _artifacts/${BASE}.bin _artifacts/${BASE}.hex"
+          test -s "_artifacts/${BASE}.hex"
+
+      # Build-time SBOM (CycloneDX 1.6): versions read from the tree plus the reviewed
+      # static list in scripts/sbom-manifest.json, with the bundled bootloader, the signing
+      # key, the toolchain and the build image recorded as built. The SBOM is the one
+      # artifact that IS attached to the public release.
+      - name: Generate SBOM
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TOOLCHAIN="$(docker run --rm ghcr.io/openwaterhealth/stm32-build-env:latest arm-none-eabi-gcc --version | head -1)"
+          IMAGE="$(docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/openwaterhealth/stm32-build-env:latest 2>/dev/null || echo ghcr.io/openwaterhealth/stm32-build-env:latest)"
+          python3 scripts/gen_sbom.py --root . --manifest scripts/sbom-manifest.json \
+            --name "${OUT}" --version "$TAG" --config Release \
+            --toolchain "$TOOLCHAIN" --build-image "$IMAGE" \
+            --bundled-bootloader "${BL_REPO}" "${{ steps.bl.outputs.tag }}" "${{ steps.bldl.outputs.sha256 }}" \
+            --signing-key "$KMS_KEY" --signing-key-fingerprint "${{ steps.pubkey.outputs.fingerprint }}" \
+            --property "openwater:fw-version-uint16=${{ steps.fwver.outputs.version }}" \
+            -o "_artifacts/${OUT}-${TAG}.cdx.json"
+
+      - name: Checksums and manifest
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          cd _artifacts
+          sha256sum *.bin *.hex *.cdx.json > SHA256SUMS
+          cat SHA256SUMS
+          python3 - "$TAG" <<'PY'
+          import json, os, subprocess, sys, datetime
+          tag = sys.argv[1]
+          sums = dict(line.split()[::-1] for line in open("SHA256SUMS").read().splitlines())
+          manifest = {
+            "product": os.environ["PRODUCT"],
+            "tag": tag,
+            "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd="..").decode().strip(),
+            "built_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "build_config": "Release",
+            "fw_version_uint16": int(os.environ["FWVER"]),
+            "bootloader": {"repo": os.environ["BL_REPO"], "tag": os.environ["BL_TAG"], "sha256": os.environ["BL_SHA"]},
+            "signing": {"kms_key_version": os.environ["KMS_KEY"],
+                        "public_key_sha256": os.environ["PUBKEY_FP"],
+                        "method": "ECDSA P-256 / SHA-256, Google Cloud KMS (HSM)"},
+            "approval": {"environment": "clinical", "requested_by": os.environ["GITHUB_ACTOR"],
+                         "run": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"},
+            "files": sums,
+          }
+          json.dump(manifest, open("clinical-build-manifest.json", "w"), indent=2)
+          print(json.dumps(manifest, indent=2))
+          PY
+        env:
+          FWVER: ${{ steps.fwver.outputs.version }}
+          BL_TAG: ${{ steps.bl.outputs.tag }}
+          BL_SHA: ${{ steps.bldl.outputs.sha256 }}
+          PUBKEY_FP: ${{ steps.pubkey.outputs.fingerprint }}
+
+      # ---------------------------
+      # Immutable copy in the private bucket (write-once identity; retention policy).
+      # A re-run for the same tag fails here if the objects already exist, which is
+      # intended: a clinical build is not silently replaced. Use a new tag.
+      # ---------------------------
+      - name: Authenticate to Google Cloud (uploader)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.UPLOADER_SA }}
+
+      - name: Upload to the artifact bucket
+        run: |
+          set -euo pipefail
+          DEST="gs://${GCS_BUCKET}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/"
+          # Uploader is write-only (objectCreator): copy each file to its exact object name.
+          for f in _artifacts/*; do
+            gcloud storage cp "$f" "${DEST}$(basename "$f")"
+          done
+          echo "Uploaded to $DEST"
+
+      - name: Release notes (clinical section)
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          {
+            echo ""
+            echo "## Clinical build"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Factory image (blank MCU, flash at 0x08000000) | \`${OUT}-${TAG}-production.hex\` / \`.bin\` |"
+            echo "| Field update (USB DFU, \`flash_firmware.py\`) | \`${OUT}-${TAG}-signed.bin\` |"
+            echo "| Signed FwVersion | \`${{ steps.fwver.outputs.version }}\` |"
+            echo "| Bootloader | \`${BL_REPO}\` \`${{ steps.bl.outputs.tag }}\`, SHA-256 \`${{ steps.bldl.outputs.sha256 }}\` |"
+            echo "| Trusted signing key (SHA-256 of public key) | \`${{ steps.pubkey.outputs.fingerprint }}\` |"
+            echo "| Signing key | \`${KMS_KEY}\` (Google Cloud KMS, HSM) |"
+            echo "| Approved run | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (requested by ${GITHUB_ACTOR}) |"
+            echo "| Archive | \`gs://${GCS_BUCKET}/${{ github.event.repository.name }}/${TAG}/\` |"
+            echo "| SBOM (CycloneDX 1.6) | \`${OUT}-${TAG}.cdx.json\` (attached to this release and in the archive) |"
+            echo ""
+            echo "Files are in the private bucket only (not attached here). Checksums in \`SHA256SUMS\`; full record in \`clinical-build-manifest.json\`."
+          } > clinical-notes.md
+          cat clinical-notes.md
+
+      - name: Detect release type
+        id: reltype
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+
+      # Appends the clinical notes (hashes, bucket path, approving run) to the tag's release
+      # (created by the regular tag build) or creates the release if it does not exist yet.
+      - name: Publish to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          prerelease: ${{ steps.reltype.outputs.prerelease }}
+          body_path: clinical-notes.md
+          append_body: true
+          make_latest: ${{ steps.reltype.outputs.prerelease == 'false' }}
+          # Only the SBOM is attached. The signed and production images are NOT public;
+          # they live only in the private bucket (see the notes).
+          files: |
+            _artifacts/*.cdx.json
