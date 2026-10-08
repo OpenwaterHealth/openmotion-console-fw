@@ -245,6 +245,17 @@ USBD_StatusTypeDef USBD_StdEPReq(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef 
 
   ep_addr = LOBYTE(req->wIndex);
 
+  /* LOCAL CHANGE (Openwater, CVA O2 / R7; STM32 USB Device Library v2.11.6 fix):
+   * ep_in[] / ep_out[] hold 16 entries, but the endpoint number in wIndex has
+   * 7 bits. Reject any endpoint request outside the array before it is used as
+   * an index below (GET_STATUS in the configured state wrote pep->status through
+   * ep_in[ep_addr & 0x7F]). A malicious host can send any wIndex. */
+  if ((ep_addr & 0x7FU) >= 16U)
+  {
+    USBD_CtlError(pdev, req);
+    return USBD_FAIL;
+  }
+
   switch (req->bmRequest & USB_REQ_TYPE_MASK)
   {
     case USB_REQ_TYPE_CLASS:
@@ -1011,7 +1022,11 @@ void USBD_GetString(uint8_t *desc, uint8_t *unicode, uint16_t *len)
   unicode[idx] = USB_DESC_TYPE_STRING;
   idx++;
 
-  while (*pdesc != (uint8_t)'\0')
+  /* LOCAL CHANGE (Openwater, CVA O2 / R7; v2.11.6 fix): the copy loop below was
+   * bounded only by the source string, so a descriptor string longer than
+   * USBD_MAX_STR_DESC_SIZ overran the unicode buffer even though *len had been
+   * clamped. Stop at the clamped length. */
+  while ((*pdesc != (uint8_t)'\0') && ((uint16_t)idx + 2U <= *len))
   {
     unicode[idx] = *pdesc;
     pdesc++;
