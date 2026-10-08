@@ -14,9 +14,10 @@ name: Clinical build
 #                                                       update over USB DFU (flash_firmware.py).
 #   SHA256SUMS, clinical-build-manifest.json
 #
-# and publishes them as assets of the tag's GitHub Release, as a workflow
-# artifact, and as an immutable copy in
-# gs://openwater-firmware-artifacts/openmotion-console-fw/<tag>/ (7-year retention).
+# and stores them ONLY as an immutable copy in
+# gs://openwater-firmware-artifacts/openmotion-console-fw/<tag>/ (7-year retention). Nothing is
+# attached to the public GitHub Release or kept as a workflow artifact; the release gets a
+# "Clinical build" notes section with the hashes and the bucket path.
 #
 # Identity: the job runs in the "clinical" GitHub environment (required reviewer,
 # tags-only deployment policy). Google Cloud Workload Identity Federation accepts
@@ -260,13 +261,6 @@ jobs:
           BL_SHA: ${{ steps.bldl.outputs.sha256 }}
           PUBKEY_FP: ${{ steps.pubkey.outputs.fingerprint }}
 
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.OUT }}-${{ github.ref_name }}-clinical
-          if-no-files-found: error
-          path: _artifacts/*
-
       # ---------------------------
       # Immutable copy in the private bucket (write-once identity; retention policy).
       # A re-run for the same tag fails here if the objects already exist, which is
@@ -306,7 +300,7 @@ jobs:
             echo "| Approved run | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (requested by ${GITHUB_ACTOR}) |"
             echo "| Archive | \`gs://${GCS_BUCKET}/${{ github.event.repository.name }}/${TAG}/\` |"
             echo ""
-            echo "Checksums in \`SHA256SUMS\`; full record in \`clinical-build-manifest.json\`."
+            echo "Files are in the private bucket only (not attached here). Checksums in \`SHA256SUMS\`; full record in \`clinical-build-manifest.json\`."
           } > clinical-notes.md
           cat clinical-notes.md
 
@@ -315,8 +309,8 @@ jobs:
         run: |
           if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
 
-      # Adds the clinical assets and notes to the tag's release (created by the
-      # regular tag build) or creates the release if it does not exist yet.
+      # Appends the clinical notes (hashes, bucket path, approving run) to the tag's release
+      # (created by the regular tag build) or creates the release if it does not exist yet.
       - name: Publish to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -325,7 +319,6 @@ jobs:
           prerelease: ${{ steps.reltype.outputs.prerelease }}
           body_path: clinical-notes.md
           append_body: true
-          overwrite_files: true
           make_latest: ${{ steps.reltype.outputs.prerelease == 'false' }}
-          files: |
-            _artifacts/*
+          # No files: the signed and production images are NOT public. They live only in
+          # the private bucket (see the notes); the release carries the record of the build.
