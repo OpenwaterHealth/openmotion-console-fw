@@ -54,3 +54,6 @@ platform.json
 # Superpowers brainstorming/spec/plan artifacts are local-only process docs.
 # Keep them out of the shared repo.
 docs/superpowers/
+
+# Generated at build time by scripts/gen_sbom.py (never commit)
+sbom.cdx.json

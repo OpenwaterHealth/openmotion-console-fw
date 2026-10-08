@@ -1,0 +1,209 @@
+{
+  "description": "Open-Motion console firmware (STM32H743VI): laser/TEC/trigger control, FPGA configuration, USB CDC command interface; runs from the secure bootloader's application slot.",
+  "components": [
+    {
+      "type": "library",
+      "name": "CMSIS Device STM32H7xx",
+      "supplier": {
+        "name": "STMicroelectronics"
+      },
+      "version": "1.10.6",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "purl": "pkg:github/STMicroelectronics/cmsis-device-h7@v1.10.6",
+      "properties": [
+        {
+          "name": "openwater:evidence",
+          "value": "Drivers/CMSIS/Device/ST/STM32H7xx/Include/stm32h7xx.h:108-111"
+        },
+        {
+          "name": "openwater:version-evidence",
+          "value": "no version macro in Drivers/CMSIS/Device/ST/STM32H7xx/Include/stm32h7xx.h; version from the STM32CubeH7 package the tree was taken from (CVA 2026-09-28)"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "jsmn",
+      "supplier": {
+        "name": "Serge Zaitsev"
+      },
+      "version": "0.0.0-20141117-cf38b7d",
+      "description": "JSON tokenizer (jsmn.c/jsmn.h) from https://github.com/zserge/jsmn, built without JSMN_STRICT. The in-tree copy predates the first upstream release (v1.0.0): it is closest to upstream commit cf38b7d (2014-11-17) and is locally modified (extra \"reserved\" argument on jsmn_init/jsmn_parse).",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:github/zserge/jsmn@cf38b7d17157ba674199238da776d822b184c154",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/zserge/jsmn"
+        }
+      ],
+      "properties": [
+        {
+          "name": "openwater:version-status",
+          "value": "no upstream version: pre-release snapshot identified by nearest upstream commit; locally modified"
+        },
+        {
+          "name": "openwater:upstream-latest-release",
+          "value": "v1.1.0 (2019-04-20); last upstream commit 25647e6 (2021-10-14)"
+        },
+        {
+          "name": "openwater:support-level",
+          "value": "upstream inactive - no release since 2019, no commits since 2021"
+        },
+        {
+          "name": "openwater:known-vulnerability-note",
+          "value": "CVE-2026-88369 is recorded against jsmn; see CVA J3"
+        },
+        {
+          "name": "openwater:evidence",
+          "value": "Core/Src/jsmn.c, Core/Inc/jsmn.h (byte-identical in console and sensor firmware); compared with every upstream revision of jsmn.c/jsmn.h - cf38b7d is the nearest (53 differing lines, the local modifications)"
+        },
+        {
+          "name": "openwater:local-changes",
+          "value": "toksuper guard in the ',' and JSMN_STRICT primitive cases (upstream 824d9a7; CVA O9/R7, 2026-10-08) plus the pre-existing local changes"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "lwrb (Lightweight ring buffer)",
+      "supplier": {
+        "name": "Tilen Majerle"
+      },
+      "version": "2.0.0",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:github/MaJerle/lwrb@v2.0.0",
+      "properties": [
+        {
+          "name": "openwater:evidence",
+          "value": "Core/Src/lwrb.c:32 banner (v2.0.0), Core/Inc/lwrb.h"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "STM32CubeMX generated startup and system code",
+      "supplier": {
+        "name": "STMicroelectronics"
+      },
+      "version": "6.16.1",
+      "description": "startup_stm32h743xx.s, system_stm32h7xx.c, syscalls.c, sysmem.c, HAL timebase, USB glue.",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "purl": "pkg:generic/st/stm32cubemx-generated-code@6.16.1",
+      "properties": [
+        {
+          "name": "openwater:evidence",
+          "value": "*.ioc"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "newlib-nano (libc, libm) and libgcc",
+      "supplier": {
+        "name": "Arm / Red Hat (newlib), FSF (libgcc)"
+      },
+      "version": "4.5.0",
+      "description": "C runtime linked statically from Arm GNU Toolchain 15.2.Rel1 (--specs=nano.specs, -lm).",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "name": "newlib licenses (BSD-style) / GPL-3.0 with GCC runtime exception"
+          }
+        }
+      ],
+      "cpe": "cpe:2.3:a:newlib_project:newlib:4.5.0:*:*:*:*:*:*:*",
+      "properties": [
+        {
+          "name": "openwater:evidence",
+          "value": "cmake/gcc-arm-none-eabi.cmake; toolchain 15.2.Rel1 ships newlib 4.5.0"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "STM32 USB Device Library (Core + CDC class)",
+      "supplier": {
+        "name": "STMicroelectronics"
+      },
+      "version": "2.11.3",
+      "description": "USB device stack. Does not contain the v2.11.6 endpoint-index fix.",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "name": "SLA0044"
+          }
+        }
+      ],
+      "purl": "pkg:github/STMicroelectronics/stm32-mw-usb-device@v2.11.3",
+      "properties": [
+        {
+          "name": "openwater:evidence",
+          "value": "Middlewares/ST/STM32_USB_Device_Library; Core and CDC files are byte-identical to upstream v2.11.3 (git blob hashes)"
+        },
+        {
+          "name": "openwater:local-changes",
+          "value": "2 (Middlewares/ST/STM32_USB_Device_Library/Core/Src/LOCAL_CHANGES.md): endpoint-index bound in USBD_StdEPReq and length-bounded USBD_GetString, equivalent to upstream v2.11.6 (CVA O2/R7, 2026-10-08)"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Lattice MachXO2 embedded configuration API (XO2_api, XO2_dev, XO2_cmds)",
+      "supplier": {
+        "name": "Lattice Semiconductor"
+      },
+      "description": "MachXO2 I2C programming routines (c) 2011-2012; XO2_cmds adapted to STM32 HAL I2C. Used to program the console FPGAs at runtime.",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "name": "Lattice Semiconductor license (LICENSE file referenced by the banner is not in the tree)"
+          }
+        }
+      ],
+      "purl": "pkg:generic/lattice/xo2-eca-api",
+      "properties": [
+        {
+          "name": "openwater:evidence",
+          "value": "Core/Src/XO2_*.c, Core/Inc/XO2_*.h"
+        },
+        {
+          "name": "openwater:version-status",
+          "value": "undetermined - no version identifier in the source tree"
+        }
+      ]
+    }
+  ],
+  "_note": "Reviewed static components. Versions that are machine-readable in the tree (HAL, CMSIS, toolchain, build image, bundled bootloader, signing key) are added by scripts/gen_sbom.py at build time and must not be listed here."
+}

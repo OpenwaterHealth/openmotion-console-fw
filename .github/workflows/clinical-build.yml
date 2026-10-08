@@ -225,13 +225,31 @@ jobs:
             bash -lc "arm-none-eabi-objcopy -I binary -O ihex --change-addresses=0x08000000 _artifacts/${BASE}.bin _artifacts/${BASE}.hex"
           test -s "_artifacts/${BASE}.hex"
 
+      # Build-time SBOM (CycloneDX 1.6): versions read from the tree plus the reviewed
+      # static list in scripts/sbom-manifest.json, with the bundled bootloader, the signing
+      # key, the toolchain and the build image recorded as built. The SBOM is the one
+      # artifact that IS attached to the public release.
+      - name: Generate SBOM
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TOOLCHAIN="$(docker run --rm ghcr.io/openwaterhealth/stm32-build-env:latest arm-none-eabi-gcc --version | head -1)"
+          IMAGE="$(docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/openwaterhealth/stm32-build-env:latest 2>/dev/null || echo ghcr.io/openwaterhealth/stm32-build-env:latest)"
+          python3 scripts/gen_sbom.py --root . --manifest scripts/sbom-manifest.json \
+            --name "${OUT}" --version "$TAG" --config Release \
+            --toolchain "$TOOLCHAIN" --build-image "$IMAGE" \
+            --bundled-bootloader "${BL_REPO}" "${{ steps.bl.outputs.tag }}" "${{ steps.bldl.outputs.sha256 }}" \
+            --signing-key "$KMS_KEY" --signing-key-fingerprint "${{ steps.pubkey.outputs.fingerprint }}" \
+            --property "openwater:fw-version-uint16=${{ steps.fwver.outputs.version }}" \
+            -o "_artifacts/${OUT}-${TAG}.cdx.json"
+
       - name: Checksums and manifest
         id: meta
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           cd _artifacts
-          sha256sum *.bin *.hex > SHA256SUMS
+          sha256sum *.bin *.hex *.cdx.json > SHA256SUMS
           cat SHA256SUMS
           python3 - "$TAG" <<'PY'
           import json, os, subprocess, sys, datetime
@@ -299,6 +317,7 @@ jobs:
             echo "| Signing key | \`${KMS_KEY}\` (Google Cloud KMS, HSM) |"
             echo "| Approved run | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (requested by ${GITHUB_ACTOR}) |"
             echo "| Archive | \`gs://${GCS_BUCKET}/${{ github.event.repository.name }}/${TAG}/\` |"
+            echo "| SBOM (CycloneDX 1.6) | \`${OUT}-${TAG}.cdx.json\` (attached to this release and in the archive) |"
             echo ""
             echo "Files are in the private bucket only (not attached here). Checksums in \`SHA256SUMS\`; full record in \`clinical-build-manifest.json\`."
           } > clinical-notes.md
@@ -320,5 +339,7 @@ jobs:
           body_path: clinical-notes.md
           append_body: true
           make_latest: ${{ steps.reltype.outputs.prerelease == 'false' }}
-          # No files: the signed and production images are NOT public. They live only in
-          # the private bucket (see the notes); the release carries the record of the build.
+          # Only the SBOM is attached. The signed and production images are NOT public;
+          # they live only in the private bucket (see the notes).
+          files: |
+            _artifacts/*.cdx.json

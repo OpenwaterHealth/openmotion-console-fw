@@ -54,7 +54,15 @@ jobs:
             -x "*/stm32h7xx_hal_msp.c" \
             --whitelist lizard_whitelist.csv
 
-      # 3. Vulnerability Scan against the committed SBOM
+      # 3. Generate the SBOM from this checkout, then scan it.
+      # The SBOM is not committed: scripts/gen_sbom.py derives library versions from the
+      # tree and merges the reviewed static list in scripts/sbom-manifest.json.
+      - name: Generate SBOM
+        run: |
+          python3 scripts/gen_sbom.py --root . --manifest scripts/sbom-manifest.json \
+            --name "${{ github.event.repository.name }}" --config Release -o sbom.cdx.json
+
+      # 4. Vulnerability Scan against the generated SBOM
       # grype consumes the CycloneDX SBOM and checks each component against
       # the Grype vulnerability database (NVD, OSV, GHSA, and others).
       # Fails the build on any HIGH or CRITICAL finding.
