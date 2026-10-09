@@ -52,7 +52,7 @@ env:
   BL_REPO: open-motion-console-bl
   # Bootloader release to bundle (the workflow_dispatch input overrides it). Must
   # be a tag whose binaries exist in the artifact bucket under open-motion-console-bl/<tag>/.
-  BL_RELEASE: "1.2.0-rc.1"
+  BL_RELEASE: "1.2.0"
   GCS_BUCKET: openwater-firmware-artifacts
   WIF_PROVIDER: projects/341318872140/locations/global/workloadIdentityPools/github/providers/github-oidc
   READER_SA: sa-fw-artifact-reader@openwater-cloud.iam.gserviceaccount.com
