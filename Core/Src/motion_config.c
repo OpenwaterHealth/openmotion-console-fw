@@ -3,6 +3,7 @@
 #include "common.h" // COMMAND_MAX_SIZE for internal wire buffer
 #include "jsmn.h"
 #include "json_strict.h"
+#include "msg_queue.h"
 
 #include <string.h>
 #include <stdbool.h>
@@ -14,11 +15,10 @@ static bool       g_cfg_loaded = false;
 static uint8_t g_cfg_wire_buf[COMMAND_MAX_SIZE];
 
 // ------------------- CRC16-CCITT -------------------
-// CRC-16/CCITT-FALSE: poly=0x1021, init=0xFFFF, no final XOR.
-static uint16_t crc16_ccitt(const uint8_t *data, size_t len)
+// CRC-16/CCITT-FALSE: poly=0x1021, init=0xFFFF, no final XOR. crc is the
+// running value (0xFFFF to start), so several ranges can be chained.
+static uint16_t crc16_ccitt_update(uint16_t crc, const uint8_t *data, size_t len)
 {
-    uint16_t crc = 0xFFFFu;
-
     for (size_t i = 0; i < len; i++) {
         crc ^= ((uint16_t)data[i] << 8);
         for (int b = 0; b < 8; b++) {
@@ -32,11 +32,37 @@ static uint16_t crc16_ccitt(const uint8_t *data, size_t len)
     return crc;
 }
 
+// v1 record CRC: magic, version and seq only (the bytes before the crc field).
+// Only used to recognise a v1 record for migration.
+static uint16_t motion_cfg_calc_crc_v1(const motion_cfg_t *cfg)
+{
+    return crc16_ccitt_update(0xFFFFu, (const uint8_t *)cfg,
+                              offsetof(motion_cfg_t, crc));
+}
+
+// v2 record CRC (CFW-02): every byte of the record except the crc field
+// itself -- magic, version, seq, the two reserved bytes and the whole JSON
+// area, which motion_cfg_normalize_json() NUL-pads so the value is stable.
+// A change anywhere in the JSON, including the safety limits and TEC_TRIP,
+// fails the check.
 static uint16_t motion_cfg_calc_crc(const motion_cfg_t *cfg)
 {
-    // compute CRC across everything BEFORE the crc field
-    return crc16_ccitt((const uint8_t *)cfg,
-                       offsetof(motion_cfg_t, crc));
+    const uint8_t *p = (const uint8_t *)cfg;
+    const size_t after = offsetof(motion_cfg_t, crc) + sizeof(cfg->crc);
+    uint16_t crc = crc16_ccitt_update(0xFFFFu, p, offsetof(motion_cfg_t, crc));
+
+    return crc16_ccitt_update(crc, p + after, sizeof(motion_cfg_t) - after);
+}
+
+// Report a configuration storage error on the console and to the host.
+static void motion_cfg_report(const char *msg)
+{
+    printf("ERROR: %s\r\n", msg);
+    char m[MQ_MAX_MSG_SIZE];
+    int n = snprintf(m, sizeof m, "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"%s\"}", msg);
+    if (n > 0 && (size_t)n < sizeof m) {
+        (void)mq_push(m, (size_t)n);
+    }
 }
 
 // ------------------- Helpers -------------------
@@ -74,7 +100,7 @@ static void motion_cfg_make_defaults(motion_cfg_t *dst)
     dst->crc        = motion_cfg_calc_crc(dst);
 }
 
-// Validate magic, version, CRC, and that JSON is terminated
+// Validate a v2 record: magic, version, whole-record CRC, terminated JSON.
 static bool motion_cfg_is_valid(const motion_cfg_t *cfg)
 {
     if (cfg->magic   != MOTION_MAGIC) { return false; }
@@ -89,6 +115,18 @@ static bool motion_cfg_is_valid(const motion_cfg_t *cfg)
     if (calc != cfg->crc)           { return false; }
 
     return true;
+}
+
+// A v1 record written by older firmware: its CRC covers only magic, version
+// and seq, so its JSON is not protected. Accepted once, for migration.
+static bool motion_cfg_is_valid_v1(const motion_cfg_t *cfg)
+{
+    if (cfg->magic   != MOTION_MAGIC)  { return false; }
+    if (cfg->version != MOTION_VER_V1) { return false; }
+    if (memchr(cfg->json, '\0', MOTION_CFG_JSON_MAX) == NULL) {
+        return false;
+    }
+    return motion_cfg_calc_crc_v1(cfg) == cfg->crc;
 }
 
 // Do a complete write of g_cfg into flash page.
@@ -116,8 +154,20 @@ static HAL_StatusTypeDef motion_cfg_writeback(void)
     st = Flash_Write(MOTION_CFG_PAGE_ADDR,
                      (uint32_t *)&g_cfg,
                      (uint32_t)(sizeof(motion_cfg_t) / sizeof(uint32_t)));
+    if (st != HAL_OK) {
+        motion_cfg_report("motion config flash write failed");
+        return st;
+    }
 
-    return st;
+    // CFW-02: read the record back and compare. The D-cache is off, so this
+    // reads the flash itself. A failed or partial write is reported and
+    // returned; the caller (a host write) then gets OW_ERROR.
+    if (memcmp((const void *)MOTION_CFG_PAGE_ADDR, &g_cfg, sizeof(motion_cfg_t)) != 0) {
+        motion_cfg_report("motion config flash write verify failed");
+        return HAL_ERROR;
+    }
+
+    return HAL_OK;
 }
 
 // Raw load from flash into g_cfg
@@ -137,7 +187,16 @@ static void motion_cfg_ensure_loaded(void)
 
     motion_cfg_load_raw();
 
-    if (!motion_cfg_is_valid(&g_cfg)) {
+    if (motion_cfg_is_valid(&g_cfg)) {
+        // v2 record, intact.
+    } else if (motion_cfg_is_valid_v1(&g_cfg)) {
+        // v1 record from older firmware: keep its JSON and rewrite it as v2,
+        // so it is protected from here on. The JSON is re-checked by the
+        // strict parse in motion_cfg_apply_settings() as before.
+        printf("motion config: migrating v1 record to v2\r\n");
+        g_cfg.version = MOTION_VER;
+        (void)motion_cfg_writeback();
+    } else {
         // First boot or corrupt -> defaults and persist
         motion_cfg_make_defaults(&g_cfg);
         (void)motion_cfg_writeback();
@@ -220,7 +279,7 @@ HAL_StatusTypeDef motion_cfg_wire_read(const uint8_t **out_buf,
 
     motion_cfg_wire_hdr_t hdr;
     hdr.magic = g_cfg.magic;
-    hdr.version = g_cfg.version;
+    hdr.version = MOTION_WIRE_VER; // wire format, not the stored schema
     hdr.seq = g_cfg.seq;
     hdr.crc = g_cfg.crc;
 
@@ -257,7 +316,7 @@ HAL_StatusTypeDef motion_cfg_wire_write(const uint8_t *buf, uint16_t len)
         memcpy(&hdr, buf, sizeof(hdr));
 
         uint32_t expected_magic = MOTION_MAGIC;
-        uint32_t expected_ver = MOTION_VER;
+        uint32_t expected_ver = MOTION_WIRE_VER;
 
         if (hdr.magic == expected_magic && hdr.version == expected_ver) {
             uint32_t total = (uint32_t)sizeof(motion_cfg_wire_hdr_t) + (uint32_t)hdr.json_len;

@@ -13,7 +13,15 @@ extern "C" {
 
 // Magic/version identifiers stored in flash
 #define MOTION_MAGIC   (0x4D4F5449UL)  // 'MOTI'
-#define MOTION_VER     (0x00010000UL)  // bump if layout changes
+// Stored record schema. v2 (CFW-02): the CRC covers the whole record, JSON
+// included. v1 records (CRC over magic/version/seq only) are migrated to v2
+// at load. Bump if the layout or the CRC coverage changes.
+#define MOTION_VER     (0x00020000UL)
+#define MOTION_VER_V1  (0x00010000UL)
+// OW_CMD_USR_CFG wire-header version (SDK MotionConfig MOTION_VER). It
+// describes the wire format, not the stored record, and stays 1.0.0 so hosts
+// need no change.
+#define MOTION_WIRE_VER (0x00010000UL)
 
 // Flash layout info: one 2KB page at 0x0801F000
 #define MOTION_CFG_PAGE_ADDR      (ADDR_FLASH_SECTOR_7_BANK2)
@@ -49,7 +57,7 @@ typedef struct __attribute__((packed, aligned(4))) {
     uint32_t version;      // MOTION_VER
     uint32_t seq;          // monotonic counter
 
-    uint16_t crc;          // CRC16-CCITT over bytes [0 .. offsetof(crc)-1]
+    uint16_t crc;          // v2: CRC16-CCITT over the whole record except this field
     uint8_t  reserved;
     uint8_t  reserved2;
 
