@@ -178,11 +178,21 @@ static void updateTimerDataFromPeripheral()
 	 trigger_config.TriggerStatus = TIM_CHANNEL_STATE_GET(&FSYNC_TIMER, FSYNC_TIMER_CHAN);
 }
 
+/* Host-loss finish work deferred from the USB interrupt (CFW-11). */
+static volatile bool s_host_loss_pending = false;
+
+static void trigger_stop_outputs(void);
+
+/* USB DISCONNECT / PORT_CLOSE: runs in the USB interrupt (and from
+ * usb_recovery_task). Only latches the interlock and stops the outputs, which
+ * is register and GPIO work; the odometer update (I2C EEPROM write, printf)
+ * and the LED run from Trigger_Service() in the main loop (CFW-11). */
 static void trigger_usb_disconnect_cb(usb_event_t event)
 {
     (void)event;
     _usb_trigger_interlock = 1;
-    Trigger_Stop();
+    trigger_stop_outputs();
+    s_host_loss_pending = true;
 }
 
 static void trigger_usb_connect_cb(usb_event_t event)
@@ -376,6 +386,8 @@ uint8_t Trigger_GetInterlocks(void)
 }
 
 HAL_StatusTypeDef Trigger_Start() {
+    Trigger_Service(); /* finish a pending host-loss stop first (CFW-11) */
+
     /* Every interlock that stops the trigger also refuses a restart while it
      * is set: host loss, the EE/OPT laser-safety latch, and the TEC thermal
      * trip (_safety_trigger_interlock, cleared by tec_trip_evaluate after 200
@@ -423,8 +435,24 @@ HAL_StatusTypeDef Trigger_Start() {
     return HAL_OK;
 }
 
-HAL_StatusTypeDef Trigger_Stop() {
+/* Main-loop work after a host loss: finish the odometer scan and show idle.
+ * Called at the top of every main-loop iteration (before commands are
+ * processed) and at the start of Trigger_Start(), so a scan's odometer update
+ * always lands before the next scan starts. */
+void Trigger_Service(void)
+{
+    if (!s_host_loss_pending) {
+        return;
+    }
+    s_host_loss_pending = false;
+    Odometer_Scan_Finish();
+    LED_Indicator_Set(LED_GREEN); // idle
+}
 
+/* Stop the trigger outputs: interrupt-safe (timer registers and GPIO only, no
+ * bus traffic, no printf). */
+static void trigger_stop_outputs(void)
+{
     // If already stopped, clear any pending stop request so next start isn't cut short
     if (TIM_CHANNEL_STATE_GET(&FSYNC_TIMER, FSYNC_TIMER_CHAN) != HAL_TIM_CHANNEL_STATE_BUSY) {
         fsync_disable_flag = false;
@@ -438,6 +466,10 @@ HAL_StatusTypeDef Trigger_Stop() {
 
 	HAL_GPIO_WritePin(enSyncOUT_GPIO_Port, enSyncOUT_Pin, GPIO_PIN_SET); // disable fsync output
 	HAL_GPIO_WritePin(nTRIG_GPIO_Port, nTRIG_Pin, GPIO_PIN_SET); // disable TA Trigger to fpga
+}
+
+HAL_StatusTypeDef Trigger_Stop() {
+    trigger_stop_outputs();
 
 	/* Update laser odometer at scan finish */
 	Odometer_Scan_Finish();
