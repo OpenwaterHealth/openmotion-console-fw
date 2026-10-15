@@ -22,13 +22,23 @@
 #define TRIGGER_JSON_MAX 511U
 
 /* Operating limits enforced by Trigger_SetConfig (ARCH-74, ARCH-69).
- * Frequency: 40 Hz is the system maximum (the sensor's 15 ms acceptance
- * interval). Laser gate width: the same 20..2200 us range the application
- * allows (bloodflow-app LASER_PULSE_WIDTH_MIN_US / _MAX_US); below 20 us the
- * TA driver compare underflows. The laser delay, gate and dark-frame skip
- * delay must also end inside one frame period. */
+ * Frequency depends on the build type:
+ *   Release (every shipped image, including the clinical slot image):
+ *     40 Hz only, the scan rate the application and calibration use.
+ *   Debug (CMake Debug presets, which define DEBUG; also *-dev.* CI tags):
+ *     1..100 Hz, for bench and test tools.
+ * Laser gate width: the same 20..2200 us range the application allows
+ * (bloodflow-app LASER_PULSE_WIDTH_MIN_US / _MAX_US); below 20 us the TA
+ * driver compare underflows. The laser delay, gate and dark-frame skip delay
+ * must also end inside one frame period, in every build. The EE/OPT safety
+ * FPGA pulse-rate limits apply on their own, independent of these. */
+#if defined(DEBUG)
 #define TRIGGER_FREQ_MIN_HZ          1.0f
+#define TRIGGER_FREQ_MAX_HZ          100.0f
+#else
+#define TRIGGER_FREQ_MIN_HZ          40.0f
 #define TRIGGER_FREQ_MAX_HZ          40.0f
+#endif
 #define TRIGGER_LASER_WIDTH_MIN_US   20U
 #define TRIGGER_LASER_WIDTH_MAX_US   2200U
 
@@ -40,7 +50,7 @@
 #define TRIG_START_TIMER_FAILED      0x80U  /* no interlock; FSYNC timer did not start */
 
 typedef struct {
-    float    frequencyHz;        // Trigger frequency in Hz 1.00 - 40.00 (TRIGGER_FREQ_MIN_HZ/_MAX_HZ)
+    float    frequencyHz;        // Trigger frequency in Hz: 40 (Release) or 1 - 100 (Debug); see TRIGGER_FREQ_MIN_HZ/_MAX_HZ
     uint32_t triggerPulseWidthUsec;     // Pulse width in microseconds max determined by freq
     uint32_t laserPulseDelayUsec;     // Pulse width in microseconds max based on selected freq
     uint32_t laserPulseWidthUsec;     // Pulse width in microseconds max based on selected freq
