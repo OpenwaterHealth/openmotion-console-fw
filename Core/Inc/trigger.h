@@ -78,6 +78,7 @@ void Trigger_LaserSafety_Trip(void);
 void Trigger_LaserSafety_Clear(void);
 void Trigger_LaserSafety_SetUnknown(bool unknown);
 uint8_t Trigger_GetInterlocks(void);
+bool Trigger_IsRunning(void);
 void Trigger_EmergencyStop(void);
 void Trigger_Service(void);
 void Trigger_PrintConfig(const Trigger_Config_t *config);

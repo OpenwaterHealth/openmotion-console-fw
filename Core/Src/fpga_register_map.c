@@ -91,6 +91,59 @@ static const FpgaRegisterEntry fpga_register_table[] = {
 #define FPGA_REGISTER_TABLE_SIZE \
     (sizeof(fpga_register_table) / sizeof(fpga_register_table[0]))
 
+/* True when any mapped register lives on this mux channel. */
+static bool fpga_channel_is_mapped(int mux, int channel)
+{
+    for (size_t i = 0; i < FPGA_REGISTER_TABLE_SIZE; i++) {
+        if (fpga_register_table[i].reg.muxIdx == mux &&
+            fpga_register_table[i].reg.channel == channel) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The mapped register at this location, or NULL. Aliases (EE/OPT_THRESH share
+   DRIVE_CL's offset) have the same layout, so the first match is used. */
+static const FpgaRegisterEntry *fpga_register_at(int mux, int channel,
+                                                 uint8_t i2c_addr, uint8_t offset)
+{
+    for (size_t i = 0; i < FPGA_REGISTER_TABLE_SIZE; i++) {
+        const FpgaRegister *r = &fpga_register_table[i].reg;
+        if (r->muxIdx == mux && r->channel == channel &&
+            r->i2cAddr == i2c_addr && r->offset == offset) {
+            return &fpga_register_table[i];
+        }
+    }
+    return NULL;
+}
+
+const char *fpga_passthrough_write_problem(int mux, int channel, uint8_t i2c_addr,
+                                           uint8_t offset, uint8_t len,
+                                           bool trigger_running)
+{
+    if (!fpga_channel_is_mapped(mux, channel)) {
+        return NULL;
+    }
+    const FpgaRegisterEntry *e = fpga_register_at(mux, channel, i2c_addr, offset);
+    if (e == NULL) {
+        return "not a mapped FPGA register";
+    }
+    if (e->reg.direction == FPGA_DIR_RD) {
+        return "read-only register";
+    }
+    if (strstr(e->name, "STATUS") != NULL) {
+        return "status register";
+    }
+    if (strstr(e->name, "DYNAMIC") != NULL) {
+        if (trigger_running) {
+            return "control register needs the trigger stopped";
+        }
+        return (len >= 1U && len <= e->reg.data_len) ? NULL : "length does not match the register";
+    }
+    return (len == e->reg.data_len) ? NULL : "length does not match the register";
+}
+
 const FpgaRegister *fpga_register_lookup(const char *name)
 {
     if (!name) return NULL;

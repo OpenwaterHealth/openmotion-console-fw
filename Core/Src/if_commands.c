@@ -13,6 +13,7 @@
 #include "tca9548a.h"
 #include "console_i2c_health.h"
 #include "trigger.h"
+#include "fpga_register_map.h"
 #include "fan_driver.h"
 #include "ads7828.h"
 #include "ad5761r.h"
@@ -151,6 +152,36 @@ extern volatile bool _trip_set;
 extern volatile bool _tec_sample_lock;
 extern volatile TecStats last_tec_stats;
 
+/* OW_CTRL_I2C_WR: data = mux, channel, i2c addr, register, length, bytes.
+ * The length byte must match the bytes actually sent (NEW-4), and writes to
+ * the laser and safety FPGAs go through the register-map filter (CFW-08).
+ * A refused write returns OW_ERROR with nothing written. */
+static void handle_i2c_write(const UartPacket *cmd, UartPacket *uartResp)
+{
+    const char *why = NULL;
+
+    if (cmd->data_len < 6U || cmd->data[4] != (uint8_t)(cmd->data_len - 5U) ||
+        cmd->data_len - 5U > 255U) {
+        why = "length byte does not match the payload";
+    } else {
+        why = fpga_passthrough_write_problem(cmd->data[0], cmd->data[1], cmd->data[2],
+                                             cmd->data[3], cmd->data[4], Trigger_IsRunning());
+    }
+    if (why == NULL &&
+        TCA9548A_Write_Data(cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3],
+                            cmd->data[4], &cmd->data[5]) != TCA9548A_OK) {
+        why = "I2C write failed";
+    }
+    if (why != NULL) {
+        printf("I2C_WR refused (mux %u ch %u addr 0x%02X reg 0x%02X): %s\r\n",
+               cmd->data_len > 0U ? cmd->data[0] : 0U, cmd->data_len > 1U ? cmd->data[1] : 0U,
+               cmd->data_len > 2U ? cmd->data[2] : 0U, cmd->data_len > 3U ? cmd->data[3] : 0U, why);
+        uartResp->packet_type = OW_ERROR;
+        uartResp->data_len = 0;
+        uartResp->data = NULL;
+    }
+}
+
 static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
 {
     _Bool ret = true;
@@ -276,31 +307,7 @@ static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
         break;
     case OW_CTRL_I2C_WR:
         uartResp->command = OW_CTRL_I2C_WR;
-        if (cmd->data_len < 5)
-        {
-            uartResp->packet_type = OW_ERROR;
-            uartResp->data_len = 0;
-            uartResp->data = NULL;
-        }
-        else
-        {
-            uint8_t mux_index = cmd->data[0];
-            uint8_t channel = cmd->data[1];
-            uint8_t i2c_addr = cmd->data[2];
-            uint8_t reg_addr = cmd->data[3];
-            uint8_t data_len = cmd->data[4];
-            uint8_t *pData = &cmd->data[5];
-            // printf("I2C Write MUX: %d CH: %d ADDR: 0x%02X REG: 0x%02X LEN: %d ", mux_index, channel, i2c_addr, reg_addr, data_len);
-            // printBufferAsArr(pData, data_len);
-            int8_t tca_ret = TCA9548A_Write_Data(mux_index, channel, i2c_addr, reg_addr, data_len, pData);
-            if (tca_ret != TCA9548A_OK)
-            {
-                printf("error selecting channel\r\n");
-                uartResp->packet_type = OW_ERROR;
-                uartResp->data_len = 0;
-                uartResp->data = NULL;
-            }
-        }
+        handle_i2c_write(cmd, uartResp);
         break;
     case OW_CTRL_SET_TRIG:
         uartResp->command = OW_CTRL_SET_TRIG;
