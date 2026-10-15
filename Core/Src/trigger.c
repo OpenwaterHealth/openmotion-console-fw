@@ -296,7 +296,12 @@ HAL_StatusTypeDef Trigger_SetConfig(const Trigger_Config_t *config) {
 
 
 HAL_StatusTypeDef Trigger_Start() {
-    if(_usb_trigger_interlock || _laser_safety_interlock){
+    /* Every interlock that stops the trigger also refuses a restart while it
+     * is set: host loss, the EE/OPT laser-safety latch, and the TEC thermal
+     * trip (_safety_trigger_interlock, cleared by tec_trip_evaluate after 200
+     * clean polls). Without the TEC check a host could restart the laser
+     * during a thermal trip and it ran until the next telemetry poll. */
+    if(_usb_trigger_interlock || _laser_safety_interlock || _safety_trigger_interlock){
         return HAL_ERROR;
     }
 
