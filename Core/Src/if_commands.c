@@ -350,7 +350,19 @@ static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
         uartResp->reserved = cmd->reserved;
         uartResp->data_len = 0;
 
-        Trigger_Start(); // sets the indicator blue on success
+        /* A refused start is an error to the host, with one status byte:
+         * the active TRIG_INTERLOCK_* bits, or TRIG_START_TIMER_FAILED. */
+        if (Trigger_Start() != HAL_OK) // sets the indicator blue on success
+        {
+            static uint8_t start_refusal;
+            start_refusal = Trigger_GetInterlocks();
+            if (start_refusal == 0U) {
+                start_refusal = TRIG_START_TIMER_FAILED;
+            }
+            uartResp->packet_type = OW_ERROR;
+            uartResp->data_len = 1;
+            uartResp->data = &start_refusal;
+        }
         break;
     case OW_CTRL_STOP_TRIG:
         uartResp->command = OW_CTRL_STOP_TRIG;

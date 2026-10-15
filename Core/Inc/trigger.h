@@ -21,8 +21,26 @@
  * without the terminating NUL. */
 #define TRIGGER_JSON_MAX 511U
 
+/* Operating limits enforced by Trigger_SetConfig (ARCH-74, ARCH-69).
+ * Frequency: 40 Hz is the system maximum (the sensor's 15 ms acceptance
+ * interval). Laser gate width: the same 20..2200 us range the application
+ * allows (bloodflow-app LASER_PULSE_WIDTH_MIN_US / _MAX_US); below 20 us the
+ * TA driver compare underflows. The laser delay, gate and dark-frame skip
+ * delay must also end inside one frame period. */
+#define TRIGGER_FREQ_MIN_HZ          1.0f
+#define TRIGGER_FREQ_MAX_HZ          40.0f
+#define TRIGGER_LASER_WIDTH_MIN_US   20U
+#define TRIGGER_LASER_WIDTH_MAX_US   2200U
+
+/* Trigger_GetInterlocks() bits, also the status byte of a refused
+ * OW_CTRL_START_TRIG reply. */
+#define TRIG_INTERLOCK_HOST_LOSS     0x01U  /* USB disconnect or VCP closed */
+#define TRIG_INTERLOCK_LASER_SAFETY  0x02U  /* EE/OPT safety FPGA fault latched */
+#define TRIG_INTERLOCK_TEC           0x04U  /* TEC thermal trip */
+#define TRIG_START_TIMER_FAILED      0x80U  /* no interlock; FSYNC timer did not start */
+
 typedef struct {
-    float    frequencyHz;        // Trigger frequency in Hz 1.00 - 100.00 (2-decimal precision)
+    float    frequencyHz;        // Trigger frequency in Hz 1.00 - 40.00 (TRIGGER_FREQ_MIN_HZ/_MAX_HZ)
     uint32_t triggerPulseWidthUsec;     // Pulse width in microseconds max determined by freq
     uint32_t laserPulseDelayUsec;     // Pulse width in microseconds max based on selected freq
     uint32_t laserPulseWidthUsec;     // Pulse width in microseconds max based on selected freq
@@ -45,6 +63,7 @@ void Trigger_Safety_Disconnect(void);
 void Trigger_Safety_Clear(void);
 void Trigger_LaserSafety_Trip(void);
 void Trigger_LaserSafety_Clear(void);
+uint8_t Trigger_GetInterlocks(void);
 void Trigger_PrintConfig(const Trigger_Config_t *config);
 
 void FSYNC_DelayElapsedCallback(TIM_HandleTypeDef *htim);
