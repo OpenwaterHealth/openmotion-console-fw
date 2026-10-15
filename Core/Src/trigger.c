@@ -29,6 +29,10 @@ volatile uint8_t _safety_trigger_interlock = 0;
  * is torn down so clearing a fault can't refire the laser. Separate from
  * _safety_trigger_interlock (the TEC thermal path, which auto-recovers). */
 volatile uint8_t _laser_safety_interlock = 0;
+/* Laser-safety status unknown (CFW-04): the EE or OPT safety FPGA STATUS
+ * could not be read for several polls in a row. Stops the trigger and blocks
+ * Trigger_Start until both read again and show no fault. */
+volatile uint8_t _laser_safety_unknown = 0;
 
 volatile uint32_t fsync_counter = 0;
 volatile uint32_t lsync_counter = 0;
@@ -223,6 +227,14 @@ void Trigger_LaserSafety_Clear(void)
     _laser_safety_interlock = 0;
 }
 
+void Trigger_LaserSafety_SetUnknown(bool unknown)
+{
+    _laser_safety_unknown = unknown ? 1U : 0U;
+    if (unknown) {
+        Trigger_Stop();
+    }
+}
+
 /* Check a configuration against the operating limits before anything is
  * changed. Returns the FSYNC period in 1 us ticks through *arr_out. */
 static HAL_StatusTypeDef trigger_validate(const Trigger_Config_t *config, uint32_t *arr_out)
@@ -356,6 +368,7 @@ uint8_t Trigger_GetInterlocks(void)
     uint8_t m = 0U;
     if (_usb_trigger_interlock)    { m |= TRIG_INTERLOCK_HOST_LOSS; }
     if (_laser_safety_interlock)   { m |= TRIG_INTERLOCK_LASER_SAFETY; }
+    if (_laser_safety_unknown)     { m |= TRIG_INTERLOCK_SAFETY_UNKNOWN; }
     if (_safety_trigger_interlock) { m |= TRIG_INTERLOCK_TEC; }
     if (motion_cfg_is_defaulted()) { m |= TRIG_INTERLOCK_CONFIG; }
     return m;
@@ -369,9 +382,10 @@ HAL_StatusTypeDef Trigger_Start() {
      * during a thermal trip and it ran until the next telemetry poll.
      * The console also refuses while it runs on default config because no
      * valid stored record was found (CFW-03): its per-unit safety limits
-     * and TEC trip are not in effect. */
-    if(_usb_trigger_interlock || _laser_safety_interlock || _safety_trigger_interlock ||
-       motion_cfg_is_defaulted()){
+     * and TEC trip are not in effect. An unreadable safety FPGA status is
+     * treated as a fault too (CFW-04). */
+    if(_usb_trigger_interlock || _laser_safety_interlock || _laser_safety_unknown ||
+       _safety_trigger_interlock || motion_cfg_is_defaulted()){
         return HAL_ERROR;
     }
 
