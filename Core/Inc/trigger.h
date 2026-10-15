@@ -17,6 +17,10 @@
 
 #define NUM_DARK_FRAMES_AT_START 10
 
+/* Longest trigger-configuration JSON accepted by OW_CTRL_SET_TRIG, in bytes
+ * without the terminating NUL. */
+#define TRIGGER_JSON_MAX 511U
+
 typedef struct {
     float    frequencyHz;        // Trigger frequency in Hz 1.00 - 100.00 (2-decimal precision)
     uint32_t triggerPulseWidthUsec;     // Pulse width in microseconds max determined by freq

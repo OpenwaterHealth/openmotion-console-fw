@@ -190,8 +190,11 @@ void comms_process(void)
 	cmd.data_len = (procBuffer[bufferIndex] << 8 | (procBuffer[bufferIndex+1] & 0xFF ));
 	bufferIndex += 2;
 
-	// Check if data length is valid
-	if (cmd.data_len > COMMAND_MAX_SIZE - bufferIndex && procBuffer[COMMAND_MAX_SIZE-1] != OW_END_BYTE) {
+	/* The whole frame (header, payload, CRC, end byte) must fit in procBuffer.
+	 * Reject a longer data_len before it indexes the buffer or reaches a
+	 * command handler. There is no continuation-packet support: a data_len
+	 * past the buffer only ever pointed beyond the received bytes. */
+	if (cmd.data_len > OW_MAX_PAYLOAD) {
 		resp.id = cmd.id;
 		resp.addr = 0;
 		resp.reserved = 0;
@@ -202,22 +205,14 @@ void comms_process(void)
 
 	// Extract data pointer
 	cmd.data = &procBuffer[bufferIndex];
-	if (cmd.data_len > COMMAND_MAX_SIZE) {
-		bufferIndex = COMMAND_MAX_SIZE-3; // [3 bytes from the end should be the crc for a continuation packet]
-	} else {
-		bufferIndex += cmd.data_len; // move pointer to end of data
-	}
+	bufferIndex += cmd.data_len; // move pointer to end of data
 
 	// Extract received CRC
 	cmd.crc = (procBuffer[bufferIndex] << 8 | (procBuffer[bufferIndex+1] & 0xFF ));
 	bufferIndex += 2;
 
 	// Calculate CRC for received data
-	if (cmd.data_len > COMMAND_MAX_SIZE) {
-		calculated_crc = util_crc16(&procBuffer[1], COMMAND_MAX_SIZE-3);
-	} else {
-		calculated_crc = util_crc16(&procBuffer[1], cmd.data_len + 8);
-	}
+	calculated_crc = util_crc16(&procBuffer[1], cmd.data_len + 8);
 
 	// Check CRC
 	if (cmd.crc != calculated_crc) {

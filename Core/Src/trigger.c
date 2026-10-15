@@ -362,13 +362,22 @@ HAL_StatusTypeDef Trigger_Stop() {
 
 HAL_StatusTypeDef Trigger_SetConfigFromJSON(const char *jsonString, size_t str_len)
 {
-	uint8_t tempArr[255] = {0};
+	/* Static, off the stack, with headroom: the SDK's default trigger JSON is
+	 * already ~245 bytes. Main-loop use only. */
+	static uint8_t tempArr[TRIGGER_JSON_MAX + 1U];
 	bool ret = HAL_OK;
+
+	/* str_len comes from the host packet: bound it before the copy and keep
+	 * room for the NUL that jsmn and strtoul rely on. */
+	if (jsonString == NULL || str_len == 0U || str_len > TRIGGER_JSON_MAX) {
+		return HAL_ERROR;
+	}
 
 	// Seed from current config so any field absent from JSON keeps its current value
 	Trigger_Config_t new_config = trigger_config;
     // Copy the JSON string to tempArr
     memcpy((char *)tempArr, jsonString, str_len);
+    tempArr[str_len] = '\0';
     // printf("Trigger_SetConfigFromJSON: %s\r\n", (char *)tempArr);
 
 	if (jsonToTriggerConfigData((const char *)tempArr, &new_config) == 0)
