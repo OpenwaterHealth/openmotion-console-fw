@@ -10,6 +10,12 @@
 
 #define COMMAND_MAX_SIZE 2048
 
+/* Frame overhead: start(1) id(2) type(1) command(1) addr(1) reserved(1)
+ * length(2) crc(2) end(1) = 12 bytes. OW_MAX_PAYLOAD is the largest payload
+ * whose frame fits in one COMMAND_MAX_SIZE receive buffer. */
+#define OW_FRAME_OVERHEAD 12U
+#define OW_MAX_PAYLOAD (COMMAND_MAX_SIZE - OW_FRAME_OVERHEAD)
+
 #include <stdio.h>
 #include <stdint.h>
 
