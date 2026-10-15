@@ -385,6 +385,13 @@ uint8_t Trigger_GetInterlocks(void)
     return m;
 }
 
+/* True while the FSYNC timer runs (the trigger is started). Uses the timer's
+ * own state, not the host-supplied TriggerStatus field. */
+bool Trigger_IsRunning(void)
+{
+    return TIM_CHANNEL_STATE_GET(&FSYNC_TIMER, FSYNC_TIMER_CHAN) == HAL_TIM_CHANNEL_STATE_BUSY;
+}
+
 HAL_StatusTypeDef Trigger_Start() {
     Trigger_Service(); /* finish a pending host-loss stop first (CFW-11) */
 
