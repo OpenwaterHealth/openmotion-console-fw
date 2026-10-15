@@ -272,7 +272,7 @@ _Bool process_fpga_prog_command(UartPacket *response, UartPacket *cmd)
         int i = 10;
         do
         {
-            HAL_Delay(trefresh);
+            delay_ms_wdg(trefresh); /* keeps the watchdog refreshed */
             rc = XO2ECAcmd_readStatusReg(xo2_prog_devp, &sr);
             if (rc == OK && (sr & 0x3000u) == 0x0000u)
                 break; /* DONE – device is in user mode */

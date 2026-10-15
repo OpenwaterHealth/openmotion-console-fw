@@ -325,6 +325,31 @@ HAL_StatusTypeDef Trigger_SetConfig(const Trigger_Config_t *config) {
 }
 
 
+/* Fatal-error stop (CFW-01, ARCH-82): de-assert the sync-output and TA-trigger
+ * enables and drive both timer outputs to their inactive level, with direct
+ * register writes only. Safe with interrupts disabled and from a fault
+ * handler: no HAL calls, no SysTick, no callbacks, no printf. Unlike
+ * Trigger_Stop() it does not defer the FSYNC stop to the timer ISR and does
+ * not touch the odometer or the LED. */
+void Trigger_EmergencyStop(void)
+{
+    enSyncOUT_GPIO_Port->BSRR = enSyncOUT_Pin;  /* high = fsync output disabled */
+    nTRIG_GPIO_Port->BSRR = nTRIG_Pin;          /* high = TA trigger to FPGA disabled */
+
+    TIM_TypeDef *const timers[2] = { FSYNC_TIMER.Instance, LASER_TIMER.Instance };
+    for (unsigned int i = 0U; i < 2U; i++) {
+        TIM_TypeDef *t = timers[i];
+        if (t == NULL) {
+            continue;  /* not initialised yet: its output was never enabled */
+        }
+        t->DIER = 0U;
+        t->CR1 &= ~TIM_CR1_CEN;
+        /* OC1M = forced inactive: the pin goes to its idle level at once,
+         * whatever the channel polarity (FSYNC is active high, LSYNC low). */
+        t->CCMR1 = (t->CCMR1 & ~TIM_CCMR1_OC1M) | TIM_OCMODE_FORCED_INACTIVE;
+    }
+}
+
 uint8_t Trigger_GetInterlocks(void)
 {
     uint8_t m = 0U;

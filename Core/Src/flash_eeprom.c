@@ -6,6 +6,10 @@
  */
 
 #include "flash_eeprom.h"
+#include "main.h" /* watchdog_refresh() */
+
+/* Same bound as the HAL's private FLASH_TIMEOUT_VALUE (stm32h7xx_hal_flash.c). */
+#define FLASH_ERASE_TIMEOUT_MS 50000U
 
 
 /**
@@ -162,8 +166,6 @@ HAL_StatusTypeDef Flash_Read_Bytes(uint32_t address,
 HAL_StatusTypeDef Flash_Erase(uint32_t start_address, uint32_t end_address)
 {
     HAL_StatusTypeDef status;
-    FLASH_EraseInitTypeDef erase;
-    uint32_t error;
 
     uint32_t first_sector = GetSector(start_address);
     uint32_t last_sector  = GetSector(end_address);
@@ -177,13 +179,29 @@ HAL_StatusTypeDef Flash_Erase(uint32_t start_address, uint32_t end_address)
     HAL_FLASH_Unlock();
     SCB_DisableICache();
 
-    erase.TypeErase    = FLASH_TYPEERASE_SECTORS;
-    erase.VoltageRange = FLASH_VOLTAGE_RANGE_3;
-    erase.Banks        = bank;
-    erase.Sector       = first_sector;
-    erase.NbSectors    = (last_sector - first_sector) + 1;
+    /* The same sequence as HAL_FLASHEx_Erase() for sector erase, except that
+     * the wait for each sector is split into short steps with a watchdog
+     * refresh between them: one 128 KB sector takes about 1 s, four times
+     * the 250 ms IWDG window (CFW-01). The sector being erased is in the
+     * other bank from the running code, so the CPU keeps executing. */
+    pFlash.ErrorCode = HAL_FLASH_ERROR_NONE;
+    status = FLASH_WaitForLastOperation(FLASH_ERASE_TIMEOUT_MS, bank);
+    for (uint32_t sector = first_sector; status == HAL_OK && sector <= last_sector; sector++) {
+        FLASH_Erase_Sector(sector, bank, FLASH_VOLTAGE_RANGE_3);
 
-    status = HAL_FLASHEx_Erase(&erase, &error);
+        uint32_t start = HAL_GetTick();
+        do {
+            watchdog_refresh();
+            status = FLASH_WaitForLastOperation(10U, bank);
+        } while (status == HAL_TIMEOUT && (HAL_GetTick() - start) < FLASH_ERASE_TIMEOUT_MS);
+
+        /* Erase done (or failed): clear the sector-erase request, as the HAL does. */
+        if (bank == FLASH_BANK_1) {
+            FLASH->CR1 &= (~(FLASH_CR_SER | FLASH_CR_SNB));
+        } else {
+            FLASH->CR2 &= (~(FLASH_CR_SER | FLASH_CR_SNB));
+        }
+    }
 
     HAL_FLASH_Lock();
     SCB_EnableICache();

@@ -163,6 +163,7 @@ static uint8_t I2C_scan(I2C_HandleTypeDef * pI2c, uint8_t* addr_list, size_t lis
     // Iterate through all possible 7-bit addresses
     for (uint8_t address = 0x00; address <= 0x7F; address++) {
         HAL_StatusTypeDef status;
+        watchdog_refresh(); /* up to 128 x 50 ms on a stuck bus */
         status = HAL_I2C_IsDeviceReady(pI2c, address << 1, 2, 50); // Address shift left by 1 for read/write bit
         if (status == HAL_OK) {
         	if(addr_list != NULL && found < list_size) {
@@ -242,6 +243,29 @@ void delay_ms(uint32_t ms)
     uint32_t delay_cycles = (SystemCoreClock / 1000) * ms;
     while (delay_cycles--) {
         __NOP();  // Ensures the loop doesn't get optimized away
+    }
+}
+
+/* Refresh the independent watchdog (250 ms window, CFW-01). A no-op before
+ * MX_IWDG1_Init(). Call it only from bounded waits; Error_Handler() and the
+ * fault handlers must never refresh it. */
+void watchdog_refresh(void)
+{
+    if (hiwdg1.Instance != NULL) {
+        (void)HAL_IWDG_Refresh(&hiwdg1);
+    }
+}
+
+/* HAL_Delay() that keeps the watchdog refreshed, for the boot delays and the
+ * FPGA programming waits (XO2 erase takes seconds). */
+void delay_ms_wdg(uint32_t ms)
+{
+    uint32_t start = HAL_GetTick();
+
+    watchdog_refresh();
+    while ((HAL_GetTick() - start) < ms) {
+        HAL_Delay(1);
+        watchdog_refresh();
     }
 }
 
@@ -490,7 +514,7 @@ int main(void)
   // HAL_GPIO_WritePin(SYS_EN_GPIO_Port, SYS_EN_Pin, GPIO_PIN_RESET);
 
   printf("\033c");
-  HAL_Delay(250);
+  delay_ms_wdg(250);
   printf("Openwater open-MOTION Console\r\n\r\n");
   printf("FW: %s (%s)\r\nDate: %s\r\n",
        FW_VERSION_STRING,
@@ -511,7 +535,7 @@ int main(void)
   s_xo2_handle.devType       = MachXO2_2000;
   s_xo2_handle.pI2CDrvrCalls = &s_xo2_i2c_handle;
   s_xo2_handle.pfuSecDelay   = delay_us;   /* microsecond delay */
-  s_xo2_handle.pfmSecDelay   = HAL_Delay;   /* millisecond delay */
+  s_xo2_handle.pfmSecDelay   = delay_ms_wdg; /* millisecond delay; keeps the watchdog refreshed */
 
   /* Register the handle with the command interface for page-by-page programming */
   if_cmd_set_xo2_prog_handle(&s_xo2_handle);
@@ -558,6 +582,7 @@ int main(void)
   HAL_GPIO_WritePin(nTRIG_GPIO_Port, nTRIG_Pin, GPIO_PIN_SET); // disable TA Trigger to fpga
 
   trigger_init();
+  watchdog_refresh();
   
   // config trigger timers; zero-init so unassigned fields (e.g.
   // LaserPulseSkipDelayUsec) don't inherit stack garbage — a nonzero skip
@@ -603,6 +628,7 @@ int main(void)
   //I2C_scan(&hi2c4, NULL, 0, true);
   TCA9548A_SelectChannel(0, 0); // seed config i2c
   I2C_scan(&hi2c1, NULL, 0, true);
+  watchdog_refresh();
 #endif
 
   // setup PDU monitor
@@ -649,9 +675,11 @@ int main(void)
    * both muxes and the fan bus. Caches a snapshot the host reads via
    * OW_CTRL_I2C_STATUS. Runs before telemetry/USB so the bus is quiet. */
   console_i2c_health_scan();
+  watchdog_refresh();
 
   // Init USB
   MX_USB_DEVICE_Init();
+  watchdog_refresh();
   // Arm the EFT/EMC watchdog that recovers the OTG_FS link if it hangs.
   usb_recovery_init();
   // Initialize message queue for system JSON messages
@@ -661,6 +689,7 @@ int main(void)
   // Load motion config and apply settings
   motion_cfg_get();
   motion_cfg_apply_settings();
+  watchdog_refresh();
 
   // Initialize odometers
   printf("Initialize odometers\r\n");
@@ -672,11 +701,11 @@ int main(void)
       printf("Serial_Init failed — console serial number unavailable\r\n");
   }
 
-  HAL_Delay(100);
+  delay_ms_wdg(100);
 
   // Enable USB HUB
   HAL_GPIO_WritePin(HUB_RESET_GPIO_Port, HUB_RESET_Pin, GPIO_PIN_SET);
-  HAL_Delay(100);
+  delay_ms_wdg(100);
 
   comms_init();
   pdc_poll_init();
@@ -1005,17 +1034,21 @@ static void MX_IWDG1_Init(void)
   /* USER CODE BEGIN IWDG1_Init 1 */
 
   /* USER CODE END IWDG1_Init 1 */
-  /* Timeout = (Reload + 1) * Prescaler / LSI ~= 4096 * 64 / 32000 ~= 8.2 s.
-   * Widened from the original ~0.5 s (Prescaler_4): the device initialisation
-   * between here and the first HAL_IWDG_Refresh() in the main loop (FPGA load,
-   * I2C/SPI device bring-up, the 250 ms console delay) takes far longer than
-   * 0.5 s, so the short window tripped the watchdog before the loop was reached.
-   * Matches the bootloader's IWDG window. If init ever exceeds ~8 s, add
-   * HAL_IWDG_Refresh(&hiwdg1) calls inside the long init steps. */
+  /* Timeout = (Reload + 1) * Prescaler / LSI = 1000 * 8 / 32000 = 250 ms:
+   * 10 frame periods at 40 Hz (CFW-01, ARCH-82). After a fatal fault
+   * Error_Handler() stops the trigger and stops refreshing, so the MCU resets
+   * within this window. Window = 4095 leaves the early-refresh window off.
+   * Everything that blocks longer than the window refreshes it while it
+   * waits: the boot delays and scans (watchdog_refresh(), delay_ms_wdg()),
+   * the user-config flash erase (Flash_Erase) and the XO2 FPGA programming
+   * waits (pfmSecDelay = delay_ms_wdg). Measured on the bench: boot reaches
+   * the main loop about 500 ms after HAL_Init, and the longest main-loop
+   * iteration outside those waits is under 20 ms. The FPGAs are
+   * factory-programmed and are no longer loaded at boot. */
   hiwdg1.Instance = IWDG1;
-  hiwdg1.Init.Prescaler = IWDG_PRESCALER_64;
+  hiwdg1.Init.Prescaler = IWDG_PRESCALER_8;
   hiwdg1.Init.Window = 4095;
-  hiwdg1.Init.Reload = 4095;
+  hiwdg1.Init.Reload = 999;
   if (HAL_IWDG_Init(&hiwdg1) != HAL_OK)
   {
     Error_Handler();
@@ -1985,7 +2018,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_CRC_DeInit(&hcrc);
     
     MX_USB_DEVICE_DeInit();
-    delay_ms(300);
+    /* Let the host see the USB disconnect before the reset. 300 ms is longer
+     * than the 250 ms watchdog window, so refresh it while waiting: the reset
+     * stays a software reset rather than a watchdog one (CFW-01). This runs in
+     * the TIM15 interrupt, so it busy-waits; HAL_IWDG_Refresh is one register
+     * write. */
+    for (uint32_t i = 0U; i < 300U; i++) {
+      delay_ms(1);
+      watchdog_refresh();
+    }
     // Reset the board
     NVIC_SystemReset();
 
@@ -2002,10 +2043,18 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-
+  /* Fatal error (CFW-01, ARCH-82): put the trigger in the safe state, then wait
+   * for the independent watchdog to reset the MCU. Also reached from the
+   * HardFault, MemManage, BusFault and UsageFault handlers. Interrupts are
+   * off, so Trigger_EmergencyStop() writes the timer and GPIO registers
+   * directly. The watchdog is never refreshed here, so the reset follows
+   * within its 250 ms window.
+   * TEC: the TEC DAC sets the ADN8831 temperature setpoint (TEMPSET) and the
+   * MCU has no TEC shutdown control, so writing a DAC code here could command
+   * full drive. The TEC controller is left regulating at its setpoint. */
   __disable_irq();
-  /* Flash blue LED ~500ms on/off to indicate an error state */
+  Trigger_EmergencyStop();
+  /* Flash blue LED ~500ms on/off to indicate an error state until the reset */
   while (1)
   {
     LED_RGB_SET(LED_BLUE);
