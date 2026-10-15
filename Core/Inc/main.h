@@ -70,6 +70,10 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 void motion_cfg_apply_settings(void);
+/* Independent watchdog (CFW-01): refresh it, or wait while refreshing it.
+ * Only for bounded waits; never from Error_Handler or a fault handler. */
+void watchdog_refresh(void);
+void delay_ms_wdg(uint32_t ms);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
