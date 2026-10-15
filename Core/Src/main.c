@@ -331,6 +331,83 @@ static bool apply_tec_trip_setting(const char *tmpval)
     return true;
 }
 
+/* Check the jsmn result for the stored config. Fail LOUDLY on a parse error:
+ * a silent failure leaves TEC_TRIP_VALUE at 0, which disarms the TEC thermal
+ * trip -- a safety interlock -- so it must be visible both on the serial
+ * console and to the host. */
+static bool cfg_parse_ok(int r, const jsmntok_t *tokens, unsigned int ntok)
+{
+    if (r < 0) {
+        if (r == JSMN_ERROR_NOMEM) {
+            printf("ERROR: motion config exceeds %u JSON tokens; "
+                   "settings NOT applied (TEC trip NOT armed)\r\n", ntok);
+        } else {
+            printf("ERROR: motion config JSON parse failed (jsmn err %d); "
+                   "settings NOT applied (TEC trip NOT armed)\r\n", r);
+        }
+        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"motion config parse failed; settings not applied\"}";
+        (void)mq_push(msg, strlen(msg));
+        return false;
+    }
+
+    if (r < 1 || tokens[0].type != JSMN_OBJECT) {
+        printf("ERROR: motion config JSON has no root object; "
+               "settings NOT applied (TEC trip NOT armed)\r\n");
+        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"motion config has no root object; settings not applied\"}";
+        (void)mq_push(msg, strlen(msg));
+        return false;
+    }
+    return true;
+}
+
+/* Copy one token's text into dst (NUL-terminated, truncated to fit). */
+static void cfg_copy_token(char *dst, size_t dst_size, const char *json, const jsmntok_t *t)
+{
+    int len = t->end - t->start;
+    int copy_len = (len < (int)dst_size - 1) ? len : (int)dst_size - 1;
+
+    memcpy(dst, json + t->start, (size_t)copy_len);
+    dst[copy_len] = '\0';
+}
+
+/* Apply one "key": value pair of the stored config: an FPGA register setting
+ * or TEC_TRIP. Returns true only when it set a valid TEC_TRIP. */
+static bool cfg_apply_pair(const char *json, const jsmntok_t *key, const jsmntok_t *val)
+{
+    char tmpval[64];
+    char keybuf[64];
+
+    cfg_copy_token(tmpval, sizeof(tmpval), json, val);
+    cfg_copy_token(keybuf, sizeof(keybuf), json, key);
+
+    const FpgaRegister *reg = fpga_register_lookup(keybuf);
+    if (reg != NULL) {
+        (void)apply_fpga_register_setting(reg, keybuf, tmpval);
+        return false;
+    }
+    if (strcmp(keybuf, "TEC_TRIP") == 0) {
+        return apply_tec_trip_setting(tmpval);
+    }
+    return false;
+}
+
+/* CFW-12: an absent, invalid or zero TEC_TRIP must not pass silently.
+ * tec_trip_evaluate() skips the comparison while TEC_TRIP_VALUE is 0.0, so
+ * that case disarms the TEC thermal trip. A config without a valid TEC_TRIP
+ * keeps the previous threshold, which is reported too. */
+static void report_tec_trip_state(bool tec_trip_set)
+{
+    if (TEC_TRIP_VALUE == 0.0) {
+        printf("ERROR: TEC_TRIP absent, invalid or zero; TEC thermal trip NOT armed\r\n");
+        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"TEC_TRIP absent, invalid or zero; TEC thermal trip not armed\"}";
+        (void)mq_push(msg, strlen(msg));
+    } else if (!tec_trip_set) {
+        printf("WARNING: TEC_TRIP absent or invalid in motion config; previous threshold kept\r\n");
+        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"TEC_TRIP absent or invalid in motion config; previous threshold kept\"}";
+        (void)mq_push(msg, strlen(msg));
+    }
+}
+
 void motion_cfg_apply_settings(void)
 {
     const char *json_str = motion_cfg_get_json_ptr();
@@ -341,33 +418,11 @@ void motion_cfg_apply_settings(void)
      * is too large to put on the stack of a boot-path function. This routine is
      * only ever called from the single-threaded main loop / command handler. */
     static jsmntok_t tokens[MOTION_CFG_MAX_JSON_TOKENS];
+    const unsigned int ntok = (unsigned int)(sizeof(tokens) / sizeof(tokens[0]));
 
     jsmn_init(&parser, NULL);
-    int r = jsmn_parse(&parser, json_str, strlen(json_str), tokens,
-                       sizeof(tokens) / sizeof(tokens[0]), NULL);
-
-    /* Fail LOUDLY on a parse error. A silent failure here leaves TEC_TRIP_VALUE
-     * at 0, which disarms the TEC thermal trip -- a safety interlock -- so it
-     * must be visible both on the serial console and to the host. */
-    if (r < 0) {
-        if (r == JSMN_ERROR_NOMEM) {
-            printf("ERROR: motion config exceeds %u JSON tokens; "
-                   "settings NOT applied (TEC trip NOT armed)\r\n",
-                   (unsigned)(sizeof(tokens) / sizeof(tokens[0])));
-        } else {
-            printf("ERROR: motion config JSON parse failed (jsmn err %d); "
-                   "settings NOT applied (TEC trip NOT armed)\r\n", r);
-        }
-        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"motion config parse failed; settings not applied\"}";
-        (void)mq_push(msg, strlen(msg));
-        return;
-    }
-
-    if (r < 1 || tokens[0].type != JSMN_OBJECT) {
-        printf("ERROR: motion config JSON has no root object; "
-               "settings NOT applied (TEC trip NOT armed)\r\n");
-        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"motion config has no root object; settings not applied\"}";
-        (void)mq_push(msg, strlen(msg));
+    int r = jsmn_parse(&parser, json_str, strlen(json_str), tokens, ntok, NULL);
+    if (!cfg_parse_ok(r, tokens, ntok)) {
         return;
     }
 
@@ -376,50 +431,17 @@ void motion_cfg_apply_settings(void)
     for (int i = 1; i < r; i++) {
         if (tokens[i].type != JSMN_STRING) { continue; }
 
-        int key_start = tokens[i].start;
-        int key_len   = tokens[i].end - tokens[i].start;
-
+        const jsmntok_t *key = &tokens[i];
         i++;
         if (i >= r) { break; }
         if (tokens[i].type != JSMN_PRIMITIVE) { continue; }
 
-        int val_start = tokens[i].start;
-        int val_len   = tokens[i].end - tokens[i].start;
-        char tmpval[64];
-        int copy_len = (val_len < (int)sizeof(tmpval) - 1) ? val_len : (int)sizeof(tmpval) - 1;
-        memcpy(tmpval, json_str + val_start, copy_len);
-        tmpval[copy_len] = '\0';
-
-        char keybuf[64];
-        int key_copy_len = (key_len < (int)sizeof(keybuf) - 1) ? key_len : (int)sizeof(keybuf) - 1;
-        memcpy(keybuf, json_str + key_start, key_copy_len);
-        keybuf[key_copy_len] = '\0';
-
-        const FpgaRegister *reg = fpga_register_lookup(keybuf);
-        if (reg != NULL) {
-            (void)apply_fpga_register_setting(reg, keybuf, tmpval);
-            continue;
-        }
-
-        if (key_len == (int)strlen("TEC_TRIP") &&
-            strncmp(json_str + key_start, "TEC_TRIP", key_len) == 0) {
-            tec_trip_set = apply_tec_trip_setting(tmpval);
+        if (cfg_apply_pair(json_str, key, &tokens[i])) {
+            tec_trip_set = true;
         }
     }
 
-    /* CFW-12: an absent, invalid or zero TEC_TRIP must not pass silently.
-     * tec_trip_evaluate() skips the comparison while TEC_TRIP_VALUE is 0.0, so
-     * that case disarms the TEC thermal trip. A config without a valid TEC_TRIP
-     * keeps the previous threshold, which is reported too. */
-    if (TEC_TRIP_VALUE == 0.0) {
-        printf("ERROR: TEC_TRIP absent, invalid or zero; TEC thermal trip NOT armed\r\n");
-        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"TEC_TRIP absent, invalid or zero; TEC thermal trip not armed\"}";
-        (void)mq_push(msg, strlen(msg));
-    } else if (!tec_trip_set) {
-        printf("WARNING: TEC_TRIP absent or invalid in motion config; previous threshold kept\r\n");
-        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"TEC_TRIP absent or invalid in motion config; previous threshold kept\"}";
-        (void)mq_push(msg, strlen(msg));
-    }
+    report_tec_trip_state(tec_trip_set);
 }
 
 /* USER CODE END 0 */

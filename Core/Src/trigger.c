@@ -10,6 +10,7 @@
 #include "usb_events.h"
 #include "odometer.h"
 #include "led_driver.h"
+#include "motion_config.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -356,6 +357,7 @@ uint8_t Trigger_GetInterlocks(void)
     if (_usb_trigger_interlock)    { m |= TRIG_INTERLOCK_HOST_LOSS; }
     if (_laser_safety_interlock)   { m |= TRIG_INTERLOCK_LASER_SAFETY; }
     if (_safety_trigger_interlock) { m |= TRIG_INTERLOCK_TEC; }
+    if (motion_cfg_is_defaulted()) { m |= TRIG_INTERLOCK_CONFIG; }
     return m;
 }
 
@@ -364,8 +366,12 @@ HAL_StatusTypeDef Trigger_Start() {
      * is set: host loss, the EE/OPT laser-safety latch, and the TEC thermal
      * trip (_safety_trigger_interlock, cleared by tec_trip_evaluate after 200
      * clean polls). Without the TEC check a host could restart the laser
-     * during a thermal trip and it ran until the next telemetry poll. */
-    if(_usb_trigger_interlock || _laser_safety_interlock || _safety_trigger_interlock){
+     * during a thermal trip and it ran until the next telemetry poll.
+     * The console also refuses while it runs on default config because no
+     * valid stored record was found (CFW-03): its per-unit safety limits
+     * and TEC trip are not in effect. */
+    if(_usb_trigger_interlock || _laser_safety_interlock || _safety_trigger_interlock ||
+       motion_cfg_is_defaulted()){
         return HAL_ERROR;
     }
 

@@ -6,6 +6,7 @@
 #include "memory_map.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -76,6 +77,11 @@ _Static_assert((sizeof(motion_cfg_t) % 4U) == 0U,
 // On first call, it will load from flash, validate magic/version/CRC,
 // and if invalid it writes factory defaults to flash and returns that.
 const motion_cfg_t *motion_cfg_get(void);
+// True while no valid stored record was found at load (first boot, erased
+// sector or corruption) and the console runs on the built-in defaults.
+// Cleared by a successful, verified host config write. Trigger_Start()
+// refuses while it is set (CFW-03).
+bool motion_cfg_is_defaulted(void);
 
 // Copies the current config into *out so you can edit it offline.
 // Example:

@@ -4,6 +4,31 @@
 #include <stdlib.h>
 #include <string.h>
 
+static bool is_json_literal(const char *s)
+{
+    return strcmp(s, "true") == 0 || strcmp(s, "false") == 0 || strcmp(s, "null") == 0;
+}
+
+static bool is_number_char(char c)
+{
+    return (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E';
+}
+
+/* JSON numbers start with '-' or a digit and use only these characters;
+ * strtod alone would also take "inf", "nan" and hex. */
+static bool has_number_chars(const char *s, int len)
+{
+    if (!(s[0] == '-' || (s[0] >= '0' && s[0] <= '9'))) {
+        return false;
+    }
+    for (int i = 0; i < len; i++) {
+        if (!is_number_char(s[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* One unquoted value js[start..end): true, false, null or a finite number. */
 static bool primitive_is_strict(const char *js, int start, int end)
 {
@@ -16,19 +41,11 @@ static bool primitive_is_strict(const char *js, int start, int end)
     memcpy(buf, js + start, (size_t)len);
     buf[len] = '\0';
 
-    if (strcmp(buf, "true") == 0 || strcmp(buf, "false") == 0 || strcmp(buf, "null") == 0) {
+    if (is_json_literal(buf)) {
         return true;
     }
-    /* JSON numbers start with '-' or a digit; strtod alone would also take
-     * "inf", "nan" and hex. */
-    if (!(buf[0] == '-' || (buf[0] >= '0' && buf[0] <= '9'))) {
+    if (!has_number_chars(buf, len)) {
         return false;
-    }
-    for (int i = 0; i < len; i++) {
-        char c = buf[i];
-        if (!((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E')) {
-            return false;
-        }
     }
     char *endp = NULL;
     double v = strtod(buf, &endp);
