@@ -1,6 +1,8 @@
 #include "motion_config.h"
 
 #include "common.h" // COMMAND_MAX_SIZE for internal wire buffer
+#include "jsmn.h"
+#include "json_strict.h"
 
 #include <string.h>
 #include <stdbool.h>
@@ -158,6 +160,16 @@ const char *motion_cfg_get_json_ptr(void)
     return g_cfg.json;
 }
 
+/* True when json[0..len) is a strict JSON object within MOTION_CFG_MAX_JSON_TOKENS
+ * (the parse motion_cfg_apply_settings() runs at boot, plus the value check in
+ * json_strict.c). Static token pool: too large for the command-handler stack. */
+static bool motion_cfg_json_parses(const char *json, size_t len)
+{
+    static jsmntok_t tokens[MOTION_CFG_MAX_JSON_TOKENS];
+
+    return json_object_is_strict(json, len, tokens, MOTION_CFG_MAX_JSON_TOKENS);
+}
+
 HAL_StatusTypeDef motion_cfg_set_json(const char *json, size_t len)
 {
     if (json == NULL) {
@@ -166,9 +178,19 @@ HAL_StatusTypeDef motion_cfg_set_json(const char *json, size_t len)
 
     motion_cfg_ensure_loaded();
 
-    // Copy up to max-1 so we can always NUL-terminate.
-    if (len >= MOTION_CFG_JSON_MAX) {
-        len = MOTION_CFG_JSON_MAX - 1U;
+    /* Refuse, rather than store, a config the boot-time apply could not parse:
+     * one too long for the page (it used to be truncated to fit) or one that is
+     * not a strict-JSON object. Storing it would leave the next boot without
+     * the TEC trip and the safety limits (CFW-12, CFW-15). The stored config is
+     * kept unchanged. */
+    if (len == 0U || len >= MOTION_CFG_JSON_MAX) {
+        printf("ERROR: motion config JSON is %u bytes (max %u); not stored\r\n",
+               (unsigned)len, (unsigned)(MOTION_CFG_JSON_MAX - 1U));
+        return HAL_ERROR;
+    }
+    if (!motion_cfg_json_parses(json, len)) {
+        printf("ERROR: motion config is not a strict JSON object; not stored\r\n");
+        return HAL_ERROR;
     }
 
     memcpy(g_cfg.json, json, len);
