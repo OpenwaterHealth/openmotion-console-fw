@@ -11,6 +11,7 @@
 
 static motion_cfg_t g_cfg;
 static bool       g_cfg_loaded = false;
+static bool       g_cfg_defaulted = false; // running on defaults, see motion_cfg_is_defaulted()
 
 static uint8_t g_cfg_wire_buf[COMMAND_MAX_SIZE];
 
@@ -197,9 +198,13 @@ static void motion_cfg_ensure_loaded(void)
         g_cfg.version = MOTION_VER;
         (void)motion_cfg_writeback();
     } else {
-        // First boot or corrupt -> defaults and persist
+        // CFW-03: no valid record (first boot, erased sector or corruption).
+        // Run on the built-in defaults in RAM only: the stored record is left
+        // as it is for inspection or recovery, the host is told, and
+        // Trigger_Start() refuses until the host writes a valid config.
         motion_cfg_make_defaults(&g_cfg);
-        (void)motion_cfg_writeback();
+        g_cfg_defaulted = true;
+        motion_cfg_report("motion config invalid or missing; defaults in use, trigger refused");
     }
 
     g_cfg_loaded = true;
@@ -211,6 +216,12 @@ const motion_cfg_t *motion_cfg_get(void)
 {
     motion_cfg_ensure_loaded();
     return &g_cfg;
+}
+
+bool motion_cfg_is_defaulted(void)
+{
+    motion_cfg_ensure_loaded();
+    return g_cfg_defaulted;
 }
 
 const char *motion_cfg_get_json_ptr(void)
@@ -255,8 +266,12 @@ HAL_StatusTypeDef motion_cfg_set_json(const char *json, size_t len)
     memcpy(g_cfg.json, json, len);
     g_cfg.json[len] = '\0';
 
-    // Persist.
-    return motion_cfg_writeback();
+    // Persist. A verified write ends the defaulted state (CFW-03).
+    HAL_StatusTypeDef st = motion_cfg_writeback();
+    if (st == HAL_OK) {
+        g_cfg_defaulted = false;
+    }
+    return st;
 }
 
 HAL_StatusTypeDef motion_cfg_wire_read(const uint8_t **out_buf,
