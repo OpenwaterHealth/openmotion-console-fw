@@ -222,25 +222,60 @@ void Trigger_LaserSafety_Clear(void)
     _laser_safety_interlock = 0;
 }
 
+/* Check a configuration against the operating limits before anything is
+ * changed. Returns the FSYNC period in 1 us ticks through *arr_out. */
+static HAL_StatusTypeDef trigger_validate(const Trigger_Config_t *config, uint32_t *arr_out)
+{
+    /* Written so that NaN fails both comparisons. */
+    if (!(config->frequencyHz >= TRIGGER_FREQ_MIN_HZ && config->frequencyHz <= TRIGGER_FREQ_MAX_HZ)) {
+        return HAL_ERROR;
+    }
+    uint32_t arr_ticks = (uint32_t)(1000000.0f / config->frequencyHz + 0.5f); // period in us
+
+    if (config->triggerPulseWidthUsec == 0U || config->triggerPulseWidthUsec >= arr_ticks) {
+        return HAL_ERROR;
+    }
+    if (config->laserPulseWidthUsec < TRIGGER_LASER_WIDTH_MIN_US ||
+        config->laserPulseWidthUsec > TRIGGER_LASER_WIDTH_MAX_US) {
+        return HAL_ERROR;
+    }
+    /* The long (dark) laser slot is delay + width + skip delay; it must end
+     * inside the frame. 64-bit sum so large host values cannot wrap. */
+    uint64_t long_slot = (uint64_t)config->laserPulseDelayUsec
+                       + (uint64_t)config->laserPulseWidthUsec
+                       + (uint64_t)config->LaserPulseSkipDelayUsec;
+    if (long_slot >= arr_ticks) {
+        return HAL_ERROR;
+    }
+    *arr_out = arr_ticks;
+    return HAL_OK;
+}
+
 HAL_StatusTypeDef Trigger_SetConfig(const Trigger_Config_t *config) {
     if (config == NULL) {
         return HAL_ERROR; // Null pointer guard
     }
 
-    // Add range checks for the configuration parameters
-    if (config->frequencyHz < 1.0f || config->triggerPulseWidthUsec == 0 || config->frequencyHz > 100.0f) {
-        return HAL_ERROR; // Invalid configuration values
+    /* Validate everything first: a rejected configuration leaves the running
+     * trigger and the previous configuration untouched. */
+    uint32_t arr_ticks;
+    if (trigger_validate(config, &arr_ticks) != HAL_OK) {
+        return HAL_ERROR;
     }
 
-	if(trigger_config.TriggerStatus == HAL_TIM_CHANNEL_STATE_BUSY)
+    /* A running trigger is stopped before the timers are reprogrammed. Use the
+     * timer's own state: trigger_config.TriggerStatus is a host-supplied field. */
+	if(TIM_CHANNEL_STATE_GET(&FSYNC_TIMER, FSYNC_TIMER_CHAN) == HAL_TIM_CHANNEL_STATE_BUSY)
 	{
 		// stop timer pwm
 		HAL_TIM_OC_Stop_IT(&FSYNC_TIMER, FSYNC_TIMER_CHAN);
 
-		trigger_config.TriggerStatus = HAL_TIM_CHANNEL_STATE_READY;
-
 		HAL_GPIO_WritePin(enSyncOUT_GPIO_Port, enSyncOUT_Pin, GPIO_PIN_SET); // disable fsync output
 		HAL_GPIO_WritePin(nTRIG_GPIO_Port, nTRIG_Pin, GPIO_PIN_SET); // disable TA Trigger to fpga
+
+		/* Close the scan before the pulse counters are reset below. */
+		Odometer_Scan_Finish();
+		LED_Indicator_Set(LED_GREEN); // idle
 	}
 
     // Reset the counters on SetConfig
@@ -252,12 +287,7 @@ HAL_StatusTypeDef Trigger_SetConfig(const Trigger_Config_t *config) {
     uint32_t fsync_prescaler = 119; // (e.g., 120MHz / (119+1) = 1 MHz)
     FSYNC_TIMER.Instance->PSC = fsync_prescaler;
 
-    // Calculate ARR and CCR1
-    uint32_t arr_ticks = (uint32_t)(1000000.0f / config->frequencyHz + 0.5f); // period in µs, rounded to nearest tick
-    if (config->triggerPulseWidthUsec >= arr_ticks) {
-        return HAL_ERROR; // Pulse width too long
-    }
-
+    // ARR and CCR1 (arr_ticks: period in us, from trigger_validate)
     FSYNC_TIMER.Instance->ARR = arr_ticks - 1;
     FSYNC_TIMER.Instance->CCR1 = config->triggerPulseWidthUsec;
 
@@ -295,6 +325,15 @@ HAL_StatusTypeDef Trigger_SetConfig(const Trigger_Config_t *config) {
 }
 
 
+uint8_t Trigger_GetInterlocks(void)
+{
+    uint8_t m = 0U;
+    if (_usb_trigger_interlock)    { m |= TRIG_INTERLOCK_HOST_LOSS; }
+    if (_laser_safety_interlock)   { m |= TRIG_INTERLOCK_LASER_SAFETY; }
+    if (_safety_trigger_interlock) { m |= TRIG_INTERLOCK_TEC; }
+    return m;
+}
+
 HAL_StatusTypeDef Trigger_Start() {
     /* Every interlock that stops the trigger also refuses a restart while it
      * is set: host loss, the EE/OPT laser-safety latch, and the TEC thermal
@@ -328,7 +367,9 @@ HAL_StatusTypeDef Trigger_Start() {
 	__HAL_TIM_CLEAR_FLAG(&LASER_TIMER, TIM_FLAG_UPDATE);
 	__HAL_TIM_ENABLE_IT(&LASER_TIMER, TIM_IT_UPDATE);
 	if(HAL_TIM_OC_Start_IT(&FSYNC_TIMER, FSYNC_TIMER_CHAN) != HAL_OK) {
-        return HAL_ERROR; // Handle error
+        /* Undo the partial start: de-assert the outputs and close the scan. */
+        (void)Trigger_Stop();
+        return HAL_ERROR;
 	}
 
 	LED_Indicator_Set(LED_BLUE); // trigger/laser active
@@ -388,8 +429,8 @@ HAL_StatusTypeDef Trigger_SetConfigFromJSON(const char *jsonString, size_t str_l
 	if (jsonToTriggerConfigData((const char *)tempArr, &new_config) == 0)
 	{
         Trigger_PrintConfig((const Trigger_Config_t*)&new_config);
-		Trigger_SetConfig(&new_config);
-		ret = HAL_OK;
+		/* A rejected configuration is reported to the host (CFW-05/06). */
+		ret = Trigger_SetConfig(&new_config);
 	}
 	else{
 		ret = HAL_ERROR;
