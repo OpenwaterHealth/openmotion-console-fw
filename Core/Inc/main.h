@@ -31,6 +31,7 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdbool.h>
 
 /* USER CODE END Includes */
 
@@ -70,6 +71,9 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 void motion_cfg_apply_settings(void);
+/* True when the last config apply could not load every safety limit it
+ * named (out of range, write failed, read-back mismatch) - CFW-10. */
+bool motion_cfg_limits_fault(void);
 /* Independent watchdog (CFW-01): refresh it, or wait while refreshing it.
  * Only for bounded waits; never from Error_Handler or a fault handler. */
 void watchdog_refresh(void);

@@ -369,6 +369,7 @@ uint8_t Trigger_GetInterlocks(void)
     if (_usb_trigger_interlock)    { m |= TRIG_INTERLOCK_HOST_LOSS; }
     if (_laser_safety_interlock)   { m |= TRIG_INTERLOCK_LASER_SAFETY; }
     if (_laser_safety_unknown)     { m |= TRIG_INTERLOCK_SAFETY_UNKNOWN; }
+    if (motion_cfg_limits_fault()) { m |= TRIG_INTERLOCK_LIMITS; }
     if (_safety_trigger_interlock) { m |= TRIG_INTERLOCK_TEC; }
     if (motion_cfg_is_defaulted()) { m |= TRIG_INTERLOCK_CONFIG; }
     return m;
@@ -383,9 +384,10 @@ HAL_StatusTypeDef Trigger_Start() {
      * The console also refuses while it runs on default config because no
      * valid stored record was found (CFW-03): its per-unit safety limits
      * and TEC trip are not in effect. An unreadable safety FPGA status is
-     * treated as a fault too (CFW-04). */
+     * treated as a fault too (CFW-04), and so is a safety limit from the
+     * config that was not loaded and verified (CFW-10). */
     if(_usb_trigger_interlock || _laser_safety_interlock || _laser_safety_unknown ||
-       _safety_trigger_interlock || motion_cfg_is_defaulted()){
+       _safety_trigger_interlock || motion_cfg_is_defaulted() || motion_cfg_limits_fault()){
         return HAL_ERROR;
     }
 
