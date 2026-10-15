@@ -275,39 +275,161 @@ void delay_ms_wdg(uint32_t ms)
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-/* Write one FPGA register from a parsed JSON key/value pair.
- * Returns true so the caller can unconditionally continue to the next key. */
-static bool apply_fpga_register_setting(const FpgaRegister *reg,
+/* ---- Safety limits from the stored config (CFW-10) ------------------------
+ * Every FPGA register the config sets is range-checked, written and read
+ * back. Any failure is reported to the host and refuses Trigger_Start()
+ * (TRIG_INTERLOCK_LIMITS) until a later apply succeeds. The SDK writes the
+ * same registers at connection through OW_CTRL_I2C_WR with its own read-back
+ * (SDK apply_laser_power); this covers the boot and config-write loads. */
+#define PULSE_WIDTH_UL_MAX_US  660.0   /* WI-00015 MAX_PULSE_WIDTH_LIMIT_US */
+#define TA_PULSE_WIDTH_MAX_US  600.0   /* WI-00015 MAX_TA_PULSE_WIDTH_US */
+
+static bool     s_limits_fault;
+static unsigned s_limits_fail_count;
+static char     s_limits_first_fail[56];
+
+bool motion_cfg_limits_fault(void)
+{
+    return s_limits_fault;
+}
+
+static void limits_fail(const char *key, const char *why)
+{
+    printf("ERROR: %s not applied: %s\r\n", key, why);
+    if (s_limits_fail_count == 0U) {
+        (void)snprintf(s_limits_first_fail, sizeof(s_limits_first_fail), "%s: %s", key, why);
+    }
+    s_limits_fail_count++;
+    s_limits_fault = true;
+}
+
+/* Value bounds known for a key (the SDK WI-00015 limits); NULL when it passes. */
+static const char *limit_value_problem(const char *key, double val)
+{
+    if (!isfinite(val) || val < 0.0) {
+        return "negative or not a number";
+    }
+    if ((strcmp(key, "EE_PULSE_WIDTH_UL") == 0 || strcmp(key, "OPT_PULSE_WIDTH_UL") == 0) &&
+        val > PULSE_WIDTH_UL_MAX_US) {
+        return "above 660 us";
+    }
+    if (strcmp(key, "TA_PULSE_WIDTH") == 0 && val > TA_PULSE_WIDTH_MAX_US) {
+        return "above 600 us";
+    }
+    return NULL;
+}
+
+/* Write a register and read it back; NULL on success, else the reason. */
+static const char *fpga_write_verify(const FpgaRegister *reg, const uint8_t *data)
+{
+    uint8_t rb[4] = {0, 0, 0, 0};
+
+    if (TCA9548A_Write_Data(reg->muxIdx, reg->channel, reg->i2cAddr,
+                            reg->offset, reg->data_len, (uint8_t *)data) != TCA9548A_OK) {
+        return "write failed";
+    }
+    if (TCA9548A_Read_Data(reg->muxIdx, reg->channel, reg->i2cAddr,
+                           reg->offset, reg->data_len, rb) != TCA9548A_OK) {
+        return "read-back failed";
+    }
+    if (memcmp(rb, data, reg->data_len) != 0) {
+        return "read-back mismatch";
+    }
+    return NULL;
+}
+
+/* Write one FPGA register from a parsed JSON key/value pair (CFW-10):
+ * read-only registers are skipped; one-shot commands and status registers are
+ * not settings and are refused (EE/OPT DYNAMIC_CTRL bit 0 clears the latched
+ * safety faults); the value is range-checked, written and read back. */
+static void apply_fpga_register_setting(const FpgaRegister *reg,
                                         const char *keybuf,
                                         const char *tmpval)
 {
     if (reg->direction == FPGA_DIR_RD) {
         printf("%s is read-only, skipping write\r\n", keybuf);
-        return true;
+        return;
+    }
+    if (reg->direction != FPGA_DIR_RW || strstr(keybuf, "STATUS") != NULL ||
+        strstr(keybuf, "DYNAMIC") != NULL || reg->data_len == 0U || reg->data_len > 4U) {
+        limits_fail(keybuf, "not a settable register");
+        return;
     }
 
-    double val    = strtod(tmpval, NULL);
+    double val = strtod(tmpval, NULL);
+    const char *why = limit_value_problem(keybuf, val);
+    if (why != NULL) {
+        limits_fail(keybuf, why);
+        return;
+    }
+
     double scale  = (reg->scale != 0.0f) ? (double)reg->scale : 1.0;
-    double scaled = val / scale;
-    if (scaled < 0) { scaled = 0; }
-
-    uint32_t raw = (uint32_t)(scaled + 0.5);
-    uint8_t data_buf[4] = {0, 0, 0, 0};
-    if (reg->data_len > 4) {
-        printf("Warning: data_len %u > 4, truncating\r\n", reg->data_len);
+    double scaled = val / scale + 0.5;
+    double maxraw = (reg->data_len >= 4U) ? 4294967295.0 : (double)((1UL << (8U * reg->data_len)) - 1UL);
+    if (scaled > maxraw) {
+        limits_fail(keybuf, "too large for the register");
+        return;
     }
-    for (uint8_t b = 0; b < reg->data_len && b < 4; b++) {
+
+    uint32_t raw = (uint32_t)scaled;
+    uint8_t data_buf[4] = {0, 0, 0, 0};
+    for (uint8_t b = 0; b < reg->data_len; b++) {
         data_buf[b] = (uint8_t)((raw >> (8u * b)) & 0xFFu);
     }
 
-    int8_t wret = TCA9548A_Write_Data(reg->muxIdx, reg->channel, reg->i2cAddr,
-                                      reg->offset, reg->data_len, data_buf);
-    if (wret != TCA9548A_OK) {
-        printf("ERROR writing %s to FPGA (ret=%d)\r\n", keybuf, (int)wret);
-    } else {
-        printf("Wrote %s -> raw=0x%08lX (len=%u)\r\n", keybuf, (unsigned long)raw, reg->data_len);
+    why = fpga_write_verify(reg, data_buf);
+    if (why != NULL) {
+        limits_fail(keybuf, why);
+        return;
     }
+    printf("Wrote %s -> raw=0x%08lX (len=%u), verified\r\n", keybuf, (unsigned long)raw, reg->data_len);
+}
+
+/* Read a little-endian register of up to 4 bytes through the register map. */
+static bool fpga_read_u32(const char *key, uint32_t *out)
+{
+    const FpgaRegister *reg = fpga_register_lookup(key);
+    uint8_t b[4] = {0, 0, 0, 0};
+
+    if (reg == NULL || reg->data_len > 4U ||
+        TCA9548A_Read_Data(reg->muxIdx, reg->channel, reg->i2cAddr, reg->offset,
+                           reg->data_len, b) != TCA9548A_OK) {
+        return false;
+    }
+    *out = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
     return true;
+}
+
+/* The pulse-width lower limit must not exceed the upper limit, whichever of
+ * them the config set (the other keeps its FPGA value). */
+static void check_pulse_width_order(const char *ll_key, const char *ul_key)
+{
+    uint32_t ll = 0U, ul = 0U;
+
+    if (!fpga_read_u32(ll_key, &ll) || !fpga_read_u32(ul_key, &ul)) {
+        limits_fail(ul_key, "read-back failed");
+    } else if (ll > ul) {
+        limits_fail(ll_key, "above the upper limit");
+    }
+}
+
+/* After a config apply: report a limits fault to the host and stop a running
+ * trigger. Trigger_Start() refuses while it is set. */
+static void report_limits_state(void)
+{
+    if (!s_limits_fault) {
+        return;
+    }
+    char m[MQ_MAX_MSG_SIZE];
+    /* Compact so the longest key + reason still fits one queue slot
+     * (MQ_MAX_MSG_SIZE); the first failure is named, the count covers all. */
+    int n = snprintf(m, sizeof(m),
+                     "{\"type\":\"system\",\"state\":\"error\",\"msg\":\"safety limit not applied\",\"key\":\"%.40s\",\"count\":%u}",
+                     s_limits_first_fail, s_limits_fail_count);
+    if (n > 0 && (size_t)n < sizeof(m)) {
+        (void)mq_push(m, (size_t)n);
+    }
+    (void)Trigger_Stop();
 }
 
 /* Apply TEC_TRIP temperature setpoint from a parsed JSON value string.
@@ -382,7 +504,7 @@ static bool cfg_apply_pair(const char *json, const jsmntok_t *key, const jsmntok
 
     const FpgaRegister *reg = fpga_register_lookup(keybuf);
     if (reg != NULL) {
-        (void)apply_fpga_register_setting(reg, keybuf, tmpval);
+        apply_fpga_register_setting(reg, keybuf, tmpval);
         return false;
     }
     if (strcmp(keybuf, "TEC_TRIP") == 0) {
@@ -420,9 +542,16 @@ void motion_cfg_apply_settings(void)
     static jsmntok_t tokens[MOTION_CFG_MAX_JSON_TOKENS];
     const unsigned int ntok = (unsigned int)(sizeof(tokens) / sizeof(tokens[0]));
 
+    s_limits_fault = false;
+    s_limits_fail_count = 0U;
+    s_limits_first_fail[0] = '\0';
+
     jsmn_init(&parser, NULL);
     int r = jsmn_parse(&parser, json_str, strlen(json_str), tokens, ntok, NULL);
     if (!cfg_parse_ok(r, tokens, ntok)) {
+        /* Nothing applied: the safety limits are not known to be loaded. */
+        s_limits_fault = true;
+        (void)Trigger_Stop();
         return;
     }
 
@@ -441,6 +570,9 @@ void motion_cfg_apply_settings(void)
         }
     }
 
+    check_pulse_width_order("EE_PULSE_WIDTH_LL", "EE_PULSE_WIDTH_UL");
+    check_pulse_width_order("OPT_PULSE_WIDTH_LL", "OPT_PULSE_WIDTH_UL");
+    report_limits_state();
     report_tec_trip_state(tec_trip_set);
 }
 

@@ -49,6 +49,7 @@
 #define TRIG_INTERLOCK_TEC           0x04U  /* TEC thermal trip */
 #define TRIG_INTERLOCK_CONFIG        0x08U  /* user config invalid or missing: on defaults */
 #define TRIG_INTERLOCK_SAFETY_UNKNOWN 0x10U /* EE/OPT safety FPGA status unreadable */
+#define TRIG_INTERLOCK_LIMITS        0x20U  /* safety limits from config not applied/verified */
 #define TRIG_START_TIMER_FAILED      0x80U  /* no interlock; FSYNC timer did not start */
 
 typedef struct {
