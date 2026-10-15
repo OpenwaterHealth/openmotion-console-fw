@@ -19,6 +19,7 @@
 #include "led_driver.h"
 #include "if_commands.h"
 #include "msg_queue.h"
+#include "fpga_register_map.h"
 
 #include "lwrb.h"
 #include <math.h>
@@ -329,46 +330,111 @@ static void tec_trip_evaluate(TelemetrySample *sample)
 /*
  * @brief  Poll the EE/OPT laser-safety interlock and drive the trigger edges.
  *
- * Reads the EE/OPT safety-FPGA STATUS registers (I2C 0x41, mux1 ch6=EE /
- * ch7=OPT, reg 0x24; low 3 bits = peak/pulse/rate fault latch). The safety
- * FPGAs already hardware-inhibit the TA on a trip; this only tears down the
- * trigger *source* so clearing a fault can't refire the laser (test-app #56).
- * Firmware is NOT the safety guarantee. Mirrors the TEC-trip pattern, but with
- * an explicit (not auto-timeout) recovery: the latch clears only once the FPGA
- * STATUS reads clean again (i.e. the operator cleared the fault), and
- * Trigger_Start stays blocked until then. While latched, the status LED blinks
- * blue (fault indication) whatever the trigger state, including a fault
- * already present at connect. Extracted from telemetry_poll to keep
- * that function under the IEC 62304 complexity threshold.
+ * Reads the EE/OPT safety-FPGA STATUS registers (EE_STATUS / OPT_STATUS in
+ * fpga_register_map: I2C 0x41, mux1 ch6=EE / ch7=OPT, reg 0x24; low 3 bits =
+ * peak/pulse/rate fault latch). The safety FPGAs already hardware-inhibit the
+ * TA on a trip; this only tears down the trigger *source* so clearing a fault
+ * can't refire the laser (test-app #56). Firmware is NOT the safety guarantee.
+ * Mirrors the TEC-trip pattern, but with an explicit (not auto-timeout)
+ * recovery: the latch clears only once the FPGA STATUS reads clean again (i.e.
+ * the operator cleared the fault), and Trigger_Start stays blocked until then.
+ * An unreadable status is never taken as "no fault" (CFW-04): after
+ * SAFETY_READ_FAIL_LIMIT consecutive failed polls the state becomes unknown,
+ * the trigger is stopped and Trigger_Start is refused until both STATUS
+ * registers read again with no fault. While latched or unknown, the status LED
+ * blinks blue (fault indication) whatever the trigger state, including a fault
+ * already present at connect.
  */
+#define SAFETY_READ_FAIL_LIMIT 3U   /* consecutive failed polls: 75 ms at 25 ms */
+
+static uint8_t s_safety_read_fails;
+static bool    s_safety_unknown;
+
+/* Read one safety FPGA STATUS register through the register map. */
+static bool safety_read_status(const char *name, uint8_t *out)
+{
+	const FpgaRegister *reg = fpga_register_lookup(name);
+	if (reg == NULL) {
+		return false;
+	}
+	return TCA9548A_Read_Data((uint8_t)reg->muxIdx, (uint8_t)reg->channel, reg->i2cAddr,
+	                          reg->offset, 1, out) == TCA9548A_OK;
+}
+
+static void safety_push_msg(const char *msg, size_t n)
+{
+	if (!mq_push(msg, n)) {
+		printf("Failed to push laser-safety message to queue\r\n");
+	}
+}
+
+/* A poll where the EE or OPT STATUS could not be read. */
+static void laser_safety_read_failed(bool ee_read, bool opt_read)
+{
+	if (s_safety_read_fails < 255U) {
+		s_safety_read_fails++;
+	}
+	if (s_safety_read_fails < SAFETY_READ_FAIL_LIMIT || s_safety_unknown) {
+		return;
+	}
+	s_safety_unknown = true;
+	Trigger_LaserSafety_SetUnknown(true);   /* stop trigger + block start */
+
+	char msg[128];
+	int n = snprintf(msg, sizeof(msg),
+		"{\"type\": \"system\", \"state\": \"error\", \"msg\": \"Laser safety status unreadable\", \"ee_read\": %u, \"opt_read\": %u}",
+		(unsigned)ee_read, (unsigned)opt_read);
+	if (n > 0 && (size_t)n < sizeof(msg)) {
+		safety_push_msg(msg, (size_t)n);
+	}
+	printf("++++> LASER SAFETY STATUS UNREADABLE  EE=%s OPT=%s\r\n",
+	       ee_read ? "ok" : "FAIL", opt_read ? "ok" : "FAIL");
+}
+
+/* A poll where both STATUS registers were read. */
+static void laser_safety_evaluate(uint8_t ee_status, uint8_t opt_status)
+{
+	s_safety_read_fails = 0U;
+	uint8_t fault = (uint8_t)((ee_status | opt_status) & 0x07u);
+	if (fault) {
+		Trigger_LaserSafety_Trip();   /* stop trigger + latch */
+		if (!_laser_safety_trip_set) {
+			char msg[128];
+			int n = snprintf(msg, sizeof(msg),
+				"{\"type\": \"system\", \"state\": \"error\", \"msg\": \"Laser safety trip\", \"ee\": %u, \"opt\": %u}",
+				(unsigned)ee_status, (unsigned)opt_status);
+			if (n > 0 && (size_t)n < sizeof(msg)) {
+				safety_push_msg(msg, (size_t)n);
+			}
+			_laser_safety_trip_set = true;
+			printf("++++> LASER SAFETY TRIP  EE=0x%02X OPT=0x%02X\r\n", ee_status, opt_status);
+		}
+	} else if (_laser_safety_trip_set) {
+		Trigger_LaserSafety_Clear();  /* fault cleared -> allow re-arm */
+		_laser_safety_trip_set = false;
+	}
+	if (!fault && s_safety_unknown) {
+		/* Both read again with no fault: the status is known again. */
+		s_safety_unknown = false;
+		Trigger_LaserSafety_SetUnknown(false);
+		printf("Laser safety status readable again\r\n");
+	}
+}
+
 static void laser_safety_poll(void)
 {
 	uint8_t ee_status = 0, opt_status = 0;
-	bool ee_read  = (TCA9548A_Read_Data(1, 6, 0x41, 0x24, 1, &ee_status)  == TCA9548A_OK);
-	bool opt_read = (TCA9548A_Read_Data(1, 7, 0x41, 0x24, 1, &opt_status) == TCA9548A_OK);
+	bool ee_read  = safety_read_status("EE_STATUS", &ee_status);
+	bool opt_read = safety_read_status("OPT_STATUS", &opt_status);
+
 	if (ee_read && opt_read) {
-		uint8_t fault = (uint8_t)((ee_status | opt_status) & 0x07u);
-		if (fault) {
-			Trigger_LaserSafety_Trip();   /* stop trigger + latch */
-			if (!_laser_safety_trip_set) {
-				char msg[128];
-				int n = snprintf(msg, sizeof(msg),
-					"{\"type\": \"system\", \"state\": \"error\", \"msg\": \"Laser safety trip\", \"ee\": %u, \"opt\": %u}",
-					(unsigned)ee_status, (unsigned)opt_status);
-				if (n > 0 && (size_t)n < sizeof(msg) && !mq_push(msg, (size_t)n)) {
-					printf("Failed to push laser-safety trip message to queue\r\n");
-				}
-				_laser_safety_trip_set = true;
-				printf("++++> LASER SAFETY TRIP  EE=0x%02X OPT=0x%02X\r\n", ee_status, opt_status);
-			}
-		} else if (_laser_safety_trip_set) {
-			Trigger_LaserSafety_Clear();  /* fault cleared -> allow re-arm */
-			_laser_safety_trip_set = false;
-		}
+		laser_safety_evaluate(ee_status, opt_status);
+	} else {
+		laser_safety_read_failed(ee_read, opt_read);
 	}
 	/* Driven every poll, not only after a good read, so the blink keeps time
 	 * through a transient I2C miss. */
-	LED_Fault_Indicate(_laser_safety_trip_set, HAL_GetTick());
+	LED_Fault_Indicate(_laser_safety_trip_set || s_safety_unknown, HAL_GetTick());
 }
 
 void telemetry_poll(void)

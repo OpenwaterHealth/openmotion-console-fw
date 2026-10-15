@@ -48,6 +48,7 @@
 #define TRIG_INTERLOCK_LASER_SAFETY  0x02U  /* EE/OPT safety FPGA fault latched */
 #define TRIG_INTERLOCK_TEC           0x04U  /* TEC thermal trip */
 #define TRIG_INTERLOCK_CONFIG        0x08U  /* user config invalid or missing: on defaults */
+#define TRIG_INTERLOCK_SAFETY_UNKNOWN 0x10U /* EE/OPT safety FPGA status unreadable */
 #define TRIG_START_TIMER_FAILED      0x80U  /* no interlock; FSYNC timer did not start */
 
 typedef struct {
@@ -74,6 +75,7 @@ void Trigger_Safety_Disconnect(void);
 void Trigger_Safety_Clear(void);
 void Trigger_LaserSafety_Trip(void);
 void Trigger_LaserSafety_Clear(void);
+void Trigger_LaserSafety_SetUnknown(bool unknown);
 uint8_t Trigger_GetInterlocks(void);
 void Trigger_EmergencyStop(void);
 void Trigger_PrintConfig(const Trigger_Config_t *config);
