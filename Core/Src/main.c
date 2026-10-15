@@ -880,6 +880,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Trigger_Service();  /* host-loss finish work deferred from the USB ISR (CFW-11) */
     comms_process();
     logging_pump();   /* flush USB-printf log data after command responses */
     telemetry_poll();

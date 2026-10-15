@@ -79,6 +79,7 @@ void Trigger_LaserSafety_Clear(void);
 void Trigger_LaserSafety_SetUnknown(bool unknown);
 uint8_t Trigger_GetInterlocks(void);
 void Trigger_EmergencyStop(void);
+void Trigger_Service(void);
 void Trigger_PrintConfig(const Trigger_Config_t *config);
 
 void FSYNC_DelayElapsedCallback(TIM_HandleTypeDef *htim);
