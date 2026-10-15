@@ -134,6 +134,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/ads7924.c
     Core/Src/fan_driver.c
     Core/Src/jsmn.c
+    Core/Src/json_strict.c
     Core/Src/led_driver.c
     Core/Src/logging.c
     Core/Src/lwrb.c
@@ -170,6 +171,11 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    # jsmn strict mode (CFW-15): unquoted values must be numbers, true, false
+    # or null, and must not be object keys. Both parsers (trigger JSON and the
+    # stored user config) only ever receive JSON produced by json.dumps or
+    # JSON.stringify; host_tests build jsmn the same way.
+    JSMN_STRICT
 )
 
 # Remove wrong libob.a library dependency when using cpp files

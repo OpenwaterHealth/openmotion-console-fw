@@ -286,15 +286,16 @@ static bool apply_fpga_register_setting(const FpgaRegister *reg,
     return true;
 }
 
-/* Apply TEC_TRIP temperature setpoint from a parsed JSON value string. */
-static void apply_tec_trip_setting(const char *tmpval)
+/* Apply TEC_TRIP temperature setpoint from a parsed JSON value string.
+ * Returns false (threshold unchanged) when the value is not a number. */
+static bool apply_tec_trip_setting(const char *tmpval)
 {
     char *endptr;
     double TEC_TRIP = strtod(tmpval, &endptr);
 
     if (endptr == tmpval) {
         printf("Invalid TEC_TRIP value: %s\r\n", tmpval);
-        return;
+        return false;
     }
 
     printf("TEC_TRIP found: %.3f\r\n", TEC_TRIP);
@@ -303,6 +304,7 @@ static void apply_tec_trip_setting(const char *tmpval)
     TEC_TRIP_VALUE = solve_v(r_th);
 
     printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, TEC_TRIP_VALUE);
+    return true;
 }
 
 void motion_cfg_apply_settings(void)
@@ -345,6 +347,8 @@ void motion_cfg_apply_settings(void)
         return;
     }
 
+    bool tec_trip_set = false;
+
     for (int i = 1; i < r; i++) {
         if (tokens[i].type != JSMN_STRING) { continue; }
 
@@ -375,8 +379,22 @@ void motion_cfg_apply_settings(void)
 
         if (key_len == (int)strlen("TEC_TRIP") &&
             strncmp(json_str + key_start, "TEC_TRIP", key_len) == 0) {
-            apply_tec_trip_setting(tmpval);
+            tec_trip_set = apply_tec_trip_setting(tmpval);
         }
+    }
+
+    /* CFW-12: an absent, invalid or zero TEC_TRIP must not pass silently.
+     * tec_trip_evaluate() skips the comparison while TEC_TRIP_VALUE is 0.0, so
+     * that case disarms the TEC thermal trip. A config without a valid TEC_TRIP
+     * keeps the previous threshold, which is reported too. */
+    if (TEC_TRIP_VALUE == 0.0) {
+        printf("ERROR: TEC_TRIP absent, invalid or zero; TEC thermal trip NOT armed\r\n");
+        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"TEC_TRIP absent, invalid or zero; TEC thermal trip not armed\"}";
+        (void)mq_push(msg, strlen(msg));
+    } else if (!tec_trip_set) {
+        printf("WARNING: TEC_TRIP absent or invalid in motion config; previous threshold kept\r\n");
+        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"TEC_TRIP absent or invalid in motion config; previous threshold kept\"}";
+        (void)mq_push(msg, strlen(msg));
     }
 }
 
