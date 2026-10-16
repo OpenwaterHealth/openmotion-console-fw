@@ -171,7 +171,7 @@ jobs:
           echo "**Build Time:** ${{ steps.buildmeta.outputs.datetime }}" >> notes.md
           echo "**Build Config:** ${{ steps.cfg.outputs.config }}" >> notes.md
           echo "" >> notes.md
-          echo "Developer build: all images here are **unsigned** (bare-metal and slot). Signed field-update images and the factory production image for this tag come from the manual *Clinical build* workflow and are not published here." >> notes.md
+          echo "Developer build: all images here are **unsigned** (bare-metal and slot)." >> notes.md
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
