@@ -16,8 +16,8 @@ name: Clinical build
 #
 # and stores them ONLY as an immutable copy in
 # gs://openwater-firmware-artifacts/openmotion-console-fw/<tag>/ (7-year retention). Nothing is
-# attached to the public GitHub Release or kept as a workflow artifact; the release gets a
-# "Clinical build" notes section with the hashes and the bucket path.
+# attached to the public GitHub Release or kept as a workflow artifact, and the release
+# notes are not touched: nothing about this build is published in the public repo.
 #
 # Identity: the job runs in the "clinical" GitHub environment (required reviewer,
 # tags-only deployment policy). Google Cloud Workload Identity Federation accepts
@@ -299,47 +299,3 @@ jobs:
             gcloud storage cp "$f" "${DEST}$(basename "$f")"
           done
           echo "Uploaded to $DEST"
-
-      - name: Release notes (clinical section)
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          {
-            echo ""
-            echo "## Clinical build"
-            echo ""
-            echo "| | |"
-            echo "|---|---|"
-            echo "| Factory image (blank MCU, flash at 0x08000000) | \`${OUT}-${TAG}-production.hex\` / \`.bin\` |"
-            echo "| Field update (USB DFU, \`flash_firmware.py\`) | \`${OUT}-${TAG}-signed.bin\` |"
-            echo "| Signed FwVersion | \`${{ steps.fwver.outputs.version }}\` |"
-            echo "| Bootloader | \`${BL_REPO}\` \`${{ steps.bl.outputs.tag }}\`, SHA-256 \`${{ steps.bldl.outputs.sha256 }}\` |"
-            echo "| Trusted signing key (SHA-256 of public key) | \`${{ steps.pubkey.outputs.fingerprint }}\` |"
-            echo "| Signing key | \`${KMS_KEY}\` (Google Cloud KMS, HSM) |"
-            echo "| Approved run | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (requested by ${GITHUB_ACTOR}) |"
-            echo "| Archive | \`gs://${GCS_BUCKET}/${{ github.event.repository.name }}/${TAG}/\` |"
-            echo "| SBOM (CycloneDX 1.6) | \`${OUT}-${TAG}.cdx.json\` (attached to this release and in the archive) |"
-            echo ""
-            echo "Files are in the private bucket only (not attached here). Checksums in \`SHA256SUMS\`; full record in \`clinical-build-manifest.json\`."
-          } > clinical-notes.md
-          cat clinical-notes.md
-
-      - name: Detect release type
-        id: reltype
-        run: |
-          if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
-
-      # Appends the clinical notes (hashes, bucket path, approving run) to the tag's release
-      # (created by the regular tag build) or creates the release if it does not exist yet.
-      - name: Publish to the GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          prerelease: ${{ steps.reltype.outputs.prerelease }}
-          body_path: clinical-notes.md
-          append_body: true
-          make_latest: ${{ steps.reltype.outputs.prerelease == 'false' }}
-          # Only the SBOM is attached. The signed and production images are NOT public;
-          # they live only in the private bucket (see the notes).
-          files: |
-            _artifacts/*.cdx.json
