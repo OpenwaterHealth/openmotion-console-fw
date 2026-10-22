@@ -74,19 +74,27 @@ amplifier and seed drivers (`TA_CURRENT_DRV`, `TA_PULSE_WIDTH`,
 `SEED_CW_GAIN`, `SEED_DDS_GAIN`), each with a permitted range the firmware
 enforces, and the application's calibration block, which the firmware
 stores but does not interpret. The laser safety limits, the driver clamps and
-the thermal trip threshold are not part of the record: they are constants of
-the firmware image (`safety_params.h`), with per-unit safety limits held in
-the safety FPGA user flash record (section 5.4).
+the thermal trip threshold are not part of the record. The per-unit safety
+limits are held in the safety FPGA user-flash record (section 5.4). The
+safety envelope of the firmware image (`safety_envelope.h`) bounds them and
+the operating point; the driver clamps and the thermal trip threshold are
+fixed values of that envelope. The record lowers the permitted range of the
+amplifier current and pulse width for the unit.
 
 ## 5.4 Safety FPGA user-flash record (new section)
 
-Layout version 1, 32 bytes at UFM pages 600 and 601 of each safety device:
-magic `OWSR`, layout, device, pulse-width upper limit, rate lower limit,
-drive-current limit, PWM and CW current limits, per-unit ceilings for the
-amplifier current and pulse width, reserved, CRC-16/CCITT-FALSE. Written by
-a Factory image at the end of WI-00015 safety calibration; read and validated
-by the attestation. A blank user flash means "no record": the firmware
-ratings apply.
+Layout version 1, 32 bytes at UFM pages 0 and 1 of each safety device, the
+layout the safety FPGA's own loader reads (`ufm_config.v`): magic "OW",
+layout, pulse-width lower and upper limits, rate lower limit, drive-current
+limit, PWM and CW current limits (raw register values), reserved, and a
+16-bit byte-sum checksum. It is written by a Factory image at the end of
+WI-00015 safety calibration. The attestation reads it and validates every
+value against the safety envelope. When the released safety bitstream
+contains the FPGA loader, the attestation also requires the loader status
+(register 0x31) to report the record applied. A blank, corrupt or
+out-of-envelope record latches the attestation interlock; the laser cannot
+be armed. Unit serial number, calibration date and operator are not in the
+record: adding them is a change of the safety FPGA design (TODO).
 
 ## 7.2 Trigger and interlock state machine (append to the Interlocked row)
 
@@ -96,9 +104,10 @@ passes)". The start refusal status byte gains bit 0x40.
 ## 7.4 Safety limit load and verification (replace)
 
 - At console boot, after every configuration write and after every
-  completed attestation, the setpoint loader writes the compile-time limits
-  (or the per-unit record values) to the EE and OPT registers and the driver
-  clamps, and reads every register back.
+  completed attestation, the setpoint loader writes the per-unit record
+  values to the EE and OPT registers (none for a device without a valid
+  record, which stays interlocked) and the fixed driver clamps, and reads
+  every register back.
 - The SDK no longer writes the limit registers at connection; its writes to
   firmware-owned registers are refused. It reads the registers and the
   attestation report to show the state.
@@ -115,13 +124,14 @@ passes)". The start refusal status byte gains bit 0x40.
 
 ## Other documents
 
-- DC-00052 §9: the bounds of `safety_params.h` (rating per register, source
-  per value) and the per-unit record; §12 item 2 unchanged.
+- DC-00052 §9: the envelope of `safety_envelope.h` (bound per register,
+  source per value) and the per-unit record; §12 item 2 unchanged.
 - SAV (Security Architecture Views) §7.2: OI-12 closure; §5.1 firmware rows:
   the FPGA bitstreams enter the root of trust through the digest compiled
   into the signed image.
 - DC-00094 (CVA) observation on host-writable state: closed by this change;
   residual risk per docs/fpga-attestation.md §7.
 - PTR-2026-1-5 §5.2.3 and §5.3.2: the response is docs/fpga-attestation.md
-  §7; the CRC on the record remains error detection only, integrity is the
-  signed image.
+  §7; the CRC / checksum on the records remains error detection only.
+  Integrity comes from the signed image, the absence of write paths in
+  Release images, and the compiled-in envelope.

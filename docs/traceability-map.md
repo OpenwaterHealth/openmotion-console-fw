@@ -63,9 +63,9 @@ Here’s a **concise traceability map (HL → SR → FR)** that you can directly
 ### 5a. FPGA attestation and firmware-owned safety parameters (PTR-2026-1-5)
 
 - HL-SAFE-006 → SR-ATTEST-001 → FR-140, FR-141
-- HL-SAFE-006 → SR-ATTEST-002 → FR-142, FR-143, FR-145, FR-146
+- HL-SAFE-006 → SR-ATTEST-002 → FR-142, FR-143, FR-145, FR-146, FR-147
 - HL-SAFE-006 → SR-ATTEST-003 → FR-144
-- HL-SAFE-007 → SR-SAFEP-001 → FR-150, FR-151, FR-152
+- HL-SAFE-007 → SR-SAFEP-001 → FR-150, FR-151, FR-152, FR-157
 - HL-SAFE-007 → SR-SAFEP-002 → FR-153, FR-154, FR-155, FR-156
 
 ---

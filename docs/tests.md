@@ -235,7 +235,7 @@ Format:
   Maps to: SR-ATTEST-002
   Description: Boot attestation on a correctly programmed unit
   Method: HIL
-  Pass: EE and OPT match, seed and TA reported not checked, interlock 0x40 clears, run complete within 10 s (FR-146), readback time recorded
+  Pass: EE and OPT match with UFM valid, seed and TA reported not checked, interlock 0x40 clears, run complete within 10 s (FR-146), readback time recorded
 
 - TC-FPGA-009
   Maps to: SR-ATTEST-003
@@ -247,7 +247,19 @@ Format:
   Maps to: SR-ATTEST-002
   Description: Digest pipeline and UFM record validation
   Method: Test (host_tests: test_fpga_digest, test_safety_ufm_record, test_sha256)
-  Pass: NIST vectors, page-stream digest equals image digest, flipped bit / short read / swapped page detected; record good / bad checksum / out-of-range / blank / wrong device / layout / reserved
+  Pass: NIST vectors, page-stream digest equals image digest, flipped bit / short read / swapped page detected; record good / FPGA reference record byte-identical / bad checksum / outside envelope (each field, LL > UL) / blank / old layout / layout / reserved; loads only from a valid record; setpoint ceilings; envelope LSBs equal the register map
+
+- TC-FPGA-011
+  Maps to: SR-ATTEST-002, SR-SAFEP-001
+  Description: Unit without a valid safety record (blank UFM) on a Release image
+  Method: HIL (test_missing_or_invalid_record_keeps_interlock)
+  Pass: digests match, device status 0x08 (blank) or 0x04 (invalid), run FAIL, interlock 0x40 set, boot-info state FAIL, trigger start refused with 0x40
+
+- TC-SAFEP-010
+  Maps to: SR-SAFEP-001, SR-SAFEP-002
+  Description: Per-unit ceilings on the operating point
+  Method: Test (host_tests: test_motion_cfg_keys)
+  Pass: a ceiling below the envelope refuses a larger TA_CURRENT_DRV / TA_PULSE_WIDTH on the config and pass-through paths; a ceiling above the envelope leaves the envelope; safety keys take no ceiling; Factory TEC_TRIP override above 40 C refused
 
 ---
 

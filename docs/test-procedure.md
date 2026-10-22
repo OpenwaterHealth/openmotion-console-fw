@@ -158,9 +158,24 @@ Here are **structured test procedures** for representative and critical requirem
 3. Read OW_CMD_BOOT_INFO.
 
 **Expected Result:**
-- State PASS; EE and OPT: no fault bit, 3200 pages, digest equals expected, UFM blank or valid; seed and TA: status 0x40 (not checked).
+- Precondition: both safety devices provisioned with a safety record (fpga-attestation.md §6.4).
+- State PASS; EE and OPT: no fault bit, 3198 pages, digest equals expected, UFM valid (status bit 0x10); seed and TA: status 0x40 (not checked).
 - Both readbacks together complete within 10 s (about 3.2 s each at 400 kHz).
 - Boot-info interlock byte bit 0x40 clear; trigger start no longer refused for 0x40.
+
+---
+
+### TP-FPGA-005: Missing Safety Record
+**Maps to:** SR-ATTEST-002, SR-SAFEP-001
+**Steps:**
+1. On a unit whose EE or OPT UFM is blank (never provisioned), power the console with a Release image.
+2. Poll OW_CMD_FPGA_ATTEST until state is PASS or FAIL; read OW_CMD_BOOT_INFO; send OW_CTRL_START_TRIG.
+
+**Expected Result:**
+- EE and OPT digests equal expected; the unprovisioned device(s) report status bit 0x08 and ufm_status 0 (blank).
+- State FAIL, interlocked 1; boot-info attestation state 3, interlock bit 0x40 set.
+- OW_CTRL_START_TRIG refused with 0x40 in the status byte.
+- Debug UART: "Safety record: EE none, OPT none; ... the laser stays interlocked".
 
 ---
 
