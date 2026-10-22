@@ -1067,7 +1067,15 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x107075B0;
+  /* 400 kHz fast mode (was 0x107075B0, 100 kHz). I2C1 carries only the mux 0
+   * TCA9548A and the MachXO2 configuration ports (seed, TA, EE, OPT), all
+   * rated for 400 kHz. Kernel clock 60 MHz (PLL3R): PRESC 1, SCLDEL 11,
+   * SDADEL 7, SCLH 27, SCLL 39 -> tLOW 1.33 us, tHIGH 0.93 us, SCL 353-387 kHz
+   * for 50-300 ns rise time; checked against the I2C fast-mode limits.
+   * I2C2 and I2C4 stay at 100 kHz (they also carry the application FPGAs'
+   * fabric I2C slaves, not qualified at 400 kHz). Shortens the configuration
+   * attestation readback (fpga_attest.c). */
+  hi2c1.Init.Timing = 0x10B71B27;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
