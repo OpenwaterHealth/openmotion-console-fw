@@ -20,13 +20,16 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Expected digests: EE and OPT both carry the safety design. */
-static const uint8_t s_expected[FPGA_ATTEST_DEV_COUNT][SHA256_DIGEST_SIZE] = {
-    FPGA_ATTEST_DIGEST_SEED,
-    FPGA_ATTEST_DIGEST_TA,
-    FPGA_ATTEST_DIGEST_SAFETY,
-    FPGA_ATTEST_DIGEST_SAFETY,
-};
+/* Only the two safety devices are attested (EE and OPT, both carrying the
+ * safety design): they are the laser interlock and bound emission on their
+ * own (ARCH-68). The seed and TA drivers are not checked, which keeps the
+ * boot-time check to two devices; they cannot be reprogrammed from a Release
+ * image either (no programming code). Their report entries say "not
+ * checked" and carry no expected digest. Decision 2026-10-22 (bench review). */
+#define FPGA_ATTEST_CHECKED(d) ((d) == (uint8_t)MUX_FPGA_SAFE_EE || (d) == (uint8_t)MUX_FPGA_SAFE_OPT)
+#define FPGA_ATTEST_FIRST      ((uint8_t)MUX_FPGA_SAFE_EE)
+#define FPGA_ATTEST_CHECKED_COUNT 2U
+static const uint8_t s_expected_safety[SHA256_DIGEST_SIZE] = FPGA_ATTEST_DIGEST_SAFETY;
 static const char *const s_dev_name[FPGA_ATTEST_DEV_COUNT] = { "seed", "TA", "EE", "OPT" };
 
 typedef enum { STEP_OPEN = 0, STEP_PAGES, STEP_FINISH, STEP_UFM, STEP_NEXT } step_t;
@@ -82,9 +85,11 @@ void fpga_attest_init(XO2Handle_t *h)
     s_report.interlocked = 1U;
     for (uint8_t d = 0; d < FPGA_ATTEST_DEV_COUNT; d++) {
         s_report.dev[d].device = d;
-        s_report.dev[d].status = FPGA_ATTEST_ST_PENDING;
+        s_report.dev[d].status = FPGA_ATTEST_CHECKED(d) ? FPGA_ATTEST_ST_PENDING : FPGA_ATTEST_ST_NOT_CHECKED;
         s_report.dev[d].ufm_status = 0xFFU;
-        memcpy(s_report.dev[d].expected, s_expected[d], SHA256_DIGEST_SIZE);
+        if (FPGA_ATTEST_CHECKED(d)) {
+            memcpy(s_report.dev[d].expected, s_expected_safety, SHA256_DIGEST_SIZE);
+        }
     }
 }
 
@@ -94,7 +99,7 @@ bool fpga_attest_start(void)
         return false;
     }
     for (uint8_t d = 0; d < FPGA_ATTEST_DEV_COUNT; d++) {
-        s_report.dev[d].status = FPGA_ATTEST_ST_PENDING;
+        s_report.dev[d].status = FPGA_ATTEST_CHECKED(d) ? FPGA_ATTEST_ST_PENDING : FPGA_ATTEST_ST_NOT_CHECKED;
         s_report.dev[d].ufm_status = 0xFFU;
         s_report.dev[d].pages_read = 0U;
         s_report.dev[d].elapsed_ms = 0U;
@@ -105,7 +110,7 @@ bool fpga_attest_start(void)
     s_state = FPGA_ATTEST_RUNNING;
     s_report.state = (uint8_t)s_state;
     s_report.interlocked = 1U;
-    s_dev = 0U;
+    s_dev = FPGA_ATTEST_FIRST;
     s_step = STEP_OPEN;
     printf("FPGA attestation: started\r\n");
     return true;
@@ -173,7 +178,7 @@ static void step_finish(void)
     sha256_final(&s_sha, s_report.dev[s_dev].digest);
     uint32_t elapsed = HAL_GetTick() - s_dev_start_ms;
     s_report.dev[s_dev].elapsed_ms = (elapsed > 0xFFFFU) ? 0xFFFFU : (uint16_t)elapsed;
-    if (memcmp(s_report.dev[s_dev].digest, s_expected[s_dev], SHA256_DIGEST_SIZE) != 0) {
+    if (memcmp(s_report.dev[s_dev].digest, s_expected_safety, SHA256_DIGEST_SIZE) != 0) {
         dev_fail(FPGA_ATTEST_ST_DIGEST);
     } else {
         s_report.dev[s_dev].status &= (uint8_t)~FPGA_ATTEST_ST_PENDING;
@@ -225,6 +230,9 @@ static void run_finished(void)
 {
     bool fault = false;
     for (uint8_t d = 0; d < FPGA_ATTEST_DEV_COUNT; d++) {
+        if (!FPGA_ATTEST_CHECKED(d)) {
+            continue;
+        }
         const fpga_attest_dev_report_t *r = &s_report.dev[d];
         printf("FPGA attestation: %s %s (id 0x%08lX, %u pages, %u ms, UFM %s)\r\n", s_dev_name[d],
                (r->status & FPGA_ATTEST_ST_FAULT_MASK) ? "FAIL" : "ok",
@@ -274,7 +282,9 @@ void fpga_attest_service(uint32_t budget_ms)
     case STEP_UFM:    step_ufm(); break;
     case STEP_NEXT:
     default:
-        s_dev++;
+        do {
+            s_dev++;
+        } while (s_dev < FPGA_ATTEST_DEV_COUNT && !FPGA_ATTEST_CHECKED(s_dev));
         if (s_dev >= FPGA_ATTEST_DEV_COUNT) {
             run_finished();
         } else {
@@ -283,8 +293,8 @@ void fpga_attest_service(uint32_t budget_ms)
         break;
     }
     if (s_state == FPGA_ATTEST_RUNNING) {
-        uint32_t done = (uint32_t)s_dev * FPGA_ATTEST_CFG_PAGES + s_page;
-        s_report.progress_pct = (uint8_t)((done * 100U) / (FPGA_ATTEST_DEV_COUNT * FPGA_ATTEST_CFG_PAGES));
+        uint32_t done = (uint32_t)(s_dev - FPGA_ATTEST_FIRST) * FPGA_ATTEST_CFG_PAGES + s_page;
+        s_report.progress_pct = (uint8_t)((done * 100U) / (FPGA_ATTEST_CHECKED_COUNT * FPGA_ATTEST_CFG_PAGES));
     }
     watchdog_refresh();
 }

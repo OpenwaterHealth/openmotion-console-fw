@@ -235,7 +235,7 @@ Format:
   Maps to: SR-ATTEST-002
   Description: Boot attestation on a correctly programmed unit
   Method: HIL
-  Pass: all four devices match, interlock 0x40 clears, readback time recorded
+  Pass: EE and OPT match, seed and TA reported not checked, interlock 0x40 clears, run complete within 10 s (FR-146), readback time recorded
 
 - TC-FPGA-009
   Maps to: SR-ATTEST-003

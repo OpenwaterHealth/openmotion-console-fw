@@ -158,7 +158,8 @@ Here are **structured test procedures** for representative and critical requirem
 3. Read OW_CMD_BOOT_INFO.
 
 **Expected Result:**
-- State PASS; each device: status 0, 3200 pages, digest equals expected; UFM blank or valid for EE/OPT.
+- State PASS; EE and OPT: no fault bit, 3200 pages, digest equals expected, UFM blank or valid; seed and TA: status 0x40 (not checked).
+- Both readbacks together complete within 10 s (about 3.2 s each at 400 kHz).
 - Boot-info interlock byte bit 0x40 clear; trigger start no longer refused for 0x40.
 
 ---

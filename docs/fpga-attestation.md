@@ -50,8 +50,14 @@ present. The read-only entry points stay in every build for the attestation.
 
 ### 2.2 Configuration attestation
 
-`fpga_attest.c` checks the four devices on I2C mux 0 (channel 0 seed, 1 TA,
-2 EE, 3 OPT). For each device it:
+`fpga_attest.c` checks the two safety devices on I2C mux 0 (channel 2 EE,
+channel 3 OPT), which carry the laser interlock and bound emission on their
+own (ARCH-68). The seed (channel 0) and TA (channel 1) drivers are not
+attested; the report marks them "not checked" (status 0x40). Decision
+2026-10-22: the safety devices are the ones whose integrity the interlock
+depends on, and checking two instead of four halves the boot-time window. The
+seed and TA designs cannot be changed from a Release image either (section
+2.1). For each attested device it:
 
 1. reads the Lattice device ID and the status register (a device that does
    not answer or reports BUSY is a read failure; this also keeps the vendored
@@ -68,7 +74,8 @@ present. The read-only entry points stay in every build for the attestation.
    `XO2ECA_apiReadBackUFM` and validates it.
 
 The check runs in the background from the main loop, at most
-`FPGA_ATTEST_BUDGET_MS` (12 ms) of bus time per iteration, so the console
+`FPGA_ATTEST_BUDGET_MS` (12 ms) of bus time per iteration, on I2C1 at fast
+mode (about 385 kHz, section 5), so the console
 enumerates and answers commands while it runs. It starts once at the end of
 initialisation and again on `OW_CMD_FPGA_ATTEST` with `reserved = 1`; a start
 is refused with `OW_CODE_BUSY` while a run or the trigger is active, so it
@@ -214,35 +221,40 @@ openmotion-safety-fpga repository differs byte-wise from the release asset
 
 ## 5. Timing
 
-Bench measurement, console serial 338435643333, Debug image, I2C at the
-present timing (`hi2c1` Timing 0x107075B0, about 100 kHz):
+I2C1 (mux 0 and the four MachXO2 configuration ports, nothing else) runs at
+fast mode since this change: timing `0x10B71B27`, 60 MHz kernel clock,
+tLOW 1.33 us, tHIGH 0.93 us, SCL 353-387 kHz for 50-300 ns rise time, every
+fast-mode limit checked (tLOW, tHIGH, SDADEL, SCLDEL). It was `0x107075B0`
+(about 100 kHz). I2C2 and I2C4 stay at 100 kHz: they also carry the
+application FPGAs' fabric I2C slaves, which are not qualified at 400 kHz.
 
-| Device | Pages | Readback time | Notes |
+Bench measurement, console serial 338435643333, Release-policy (Debug preset)
+image, 2026-10-22:
+
+| Device | Pages | 100 kHz | 400 kHz |
 |---|---|---|---|
-| seed | 3200 | 13 860 ms | device ID 0x012BB043, digest match |
-| TA | 3200 | 13 881 ms | device ID 0x012BB043, digest match |
-| EE | 3200 | 13 604 ms | plus the 2-page UFM read; UFM blank |
-| OPT | 3200 | 13 924 ms | plus the 2-page UFM read; UFM blank |
+| EE | 3200 | 13 604 ms | 3 104 - 3 189 ms |
+| OPT | 3200 | 13 924 ms | 3 194 - 3 272 ms |
+| seed, TA | - | 13 860 / 13 881 ms | not checked |
+| Power-on to arm-able | | about 55 s (four devices) | about 6.5 s (two devices) |
 
-Measured 2026-10-22 on the bench console (bootloader 1.0.0, Debug slot
-image signed with the bench key): about 4.3 ms per page, 55 s for the four
-devices, with the 12 ms per-iteration budget. The console enumerated and
-answered OW_CMD_VERSION / BOOT_INFO / USR_CFG while the check ran; the
-interlock bit 0x40 cleared at the end and the four digests equalled the
-compiled values. The check does not block boot; it blocks arming the laser
-for those 55 s after power-on. That is far beyond the "about 3 s" threshold
-of the task and is flagged for discussion before optimising: a multi-page
-`LSC_READ_INCR_NV` read (the per-page command overhead is most of the
-4.3 ms), a larger per-iteration budget, or a faster I2C clock (must be
-checked against the FPGA designs' I2C constraints). None is done here.
+At 400 kHz a page takes about 1.0 ms. Soak: ten back-to-back runs on request
+with I2C health rescans (both buses) and TEC/telemetry reads between polls:
+ten PASS, digests always equal, no I2C error on the debug UART, I2C health
+`all_present` before and after; the HIL suite (safety state and I2C health)
+passed at 400 kHz. FPGA programming from a Factory image has not been
+exercised at 400 kHz yet; the configuration-port commands are the same.
+
+Remaining options if 6.5 s is still too long: select the mux once per device
+instead of once per command, and read several pages per command
+(`LSC_READ_INCR_NV` page count); neither is done.
 
 **Variation check result (section 6.3).** On this unit the configuration
-pages of all four devices, as read back through the configuration port,
-hash to exactly the digests computed from the packed released JEDEC files,
-so nothing inside the hashed pages differs between the artefact and a
-factory-programmed device. The two-board / reprogram-twice diff could not be
-run (one bench unit, and reprogramming it needs the Factory image and the
-SDK programmer); it stays open in section 6.3 and does not change the design.
+pages of the safety devices, as read back through the configuration port,
+hash to exactly the digest computed from the packed released JEDEC file, so
+nothing inside the hashed pages differs between the artefact and a
+factory-programmed device. The two-board / reprogram-twice diff has not been
+run; it stays open in section 6.3 and does not change the design.
 
 ## 6. Bench procedures
 
@@ -319,7 +331,7 @@ and trace ID are outside the pages, and the attestation on the first unit
    write pages 600 and 601 / `close` through the SDK, or an equivalent
    transparent-mode UFM write.
 4. Install the Release (clinical) image. Its attestation must report
-   `UFM valid` for EE and OPT and PASS for all four devices; the stored
+   `UFM valid` for EE and OPT and the run PASS; the stored
    configuration is migrated to v3 (safety keys dropped) at first boot.
 5. RMA bench recovery of a unit whose attestation fails: follow 6.2 step 4.
    The locked-bootloader recovery of WI "RMA Locked Bootloader Recovery"
@@ -340,9 +352,13 @@ The attacker cannot: change TEC_TRIP or any EE/OPT limit, driver clamp or
 control word (compiled in, refused on both the configuration and the
 pass-through path, re-asserted and read back at boot and after every
 configuration write); erase, program or alter any FPGA configuration, UFM or
-feature row (the code is absent from the image); or run a modified bitstream
-undetected (the digest is compared at boot and on request against values
-inside the signed image, and the laser cannot be armed until it matches).
+feature row (the code is absent from the image); or run a modified safety
+FPGA bitstream undetected (the EE and OPT digests are compared at boot and on
+request against values inside the signed image, and the laser cannot be
+armed until they match). The seed and TA driver designs are not attested: a
+change to them made outside the console (JTAG, or a Factory image) would not
+be detected by the console, but the attested safety FPGAs still bound pulse
+width, rate and drive current independently.
 The safety FPGAs' own hardware inhibit (ARCH-68) is unchanged and bounds
 emission independently.
 

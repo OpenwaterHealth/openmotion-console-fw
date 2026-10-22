@@ -150,7 +150,8 @@ FR-070 to FR-077 apply to Factory images only (build option `OW_FACTORY_PROGRAMM
 
 - FR-140: A Release or Debug image shall contain no FPGA or UFM programming code; the release pipeline shall fail if the image contains any programming symbol.
 - FR-141: A Release or Debug image shall answer every OW_FPGA_PROG command with OW_ERROR and the data byte OW_CODE_NOT_SUPPORTED.
-- FR-142: After initialisation, and on OW_CMD_FPGA_ATTEST request outside a scan, the firmware shall read the configuration flash of each of the four MachXO2 devices in transparent mode, compute its SHA-256 and compare it with the digest compiled into the image from the released bitstream artefacts.
+- FR-142: After initialisation, and on OW_CMD_FPGA_ATTEST request outside a scan, the firmware shall read the configuration flash of each of the two safety MachXO2 devices (EE, OPT) in transparent mode, compute its SHA-256 and compare it with the digest compiled into the image from the released safety bitstream artefact; the seed and TA devices shall be reported as not checked.
+- FR-146: I2C1 (mux 0 and the FPGA configuration ports) shall run in fast mode (at most 400 kHz); the attestation of both safety devices shall complete within 10 s of its start.
 - FR-143: For each safety FPGA the firmware shall read the per-unit calibration record from UFM and validate its magic, layout version, device, checksum and every limit against the hard bounds.
 - FR-144: A digest mismatch, read failure or invalid record shall set TRIG_INTERLOCK_FPGA_ATTEST, refuse trigger start (and configuration after a failed run), stop a running trigger, queue a fault message and be reported in the attestation and boot-information replies; the interlock shall persist until a run passes.
 - FR-145: The attestation shall not block command handling: it shall run from the main loop within a bounded bus-time budget per iteration.

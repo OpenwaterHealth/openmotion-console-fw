@@ -69,7 +69,7 @@ OW_CODE_NOT_SUPPORTED = 0xFB
 OW_CODE_BUSY = 0xFC
 TRIG_INTERLOCK_FPGA_ATTEST = 0x40
 ATTEST_IDLE, ATTEST_RUNNING, ATTEST_PASS, ATTEST_FAIL = 0, 1, 2, 3
-ST_DIGEST, ST_READ_FAIL, ST_UFM_INVALID, ST_UFM_BLANK, ST_UFM_VALID, ST_PENDING = 1, 2, 4, 8, 16, 128
+ST_DIGEST, ST_READ_FAIL, ST_UFM_INVALID, ST_UFM_BLANK, ST_UFM_VALID, ST_NOT_CHECKED, ST_PENDING = 1, 2, 4, 8, 16, 64, 128
 DEV_NAMES = {0: "seed", 1: "TA", 2: "EE", 3: "OPT"}
 
 DEV_REPORT = struct.Struct("<BBBBHHI32s32s")
@@ -179,8 +179,11 @@ def test_boot_attestation_passes_on_a_correctly_programmed_unit(console):
     assert rep["state"] == ATTEST_PASS, rep
     assert rep["interlocked"] == 0
     assert rep["cfg_pages"] == 3200
-    for d in rep["dev"]:
-        assert d["status"] & (ST_DIGEST | ST_READ_FAIL | ST_UFM_INVALID | ST_PENDING) == 0, d
+    # Only the two safety devices are attested; seed and TA say "not checked".
+    for d in rep["dev"][:2]:
+        assert d["status"] == ST_NOT_CHECKED, d
+    for d in rep["dev"][2:]:
+        assert d["status"] & (ST_DIGEST | ST_READ_FAIL | ST_UFM_INVALID | ST_PENDING | ST_NOT_CHECKED) == 0, d
         assert d["pages"] == 3200
         assert d["digest"] == d["expected"], DEV_NAMES[d["device"]]
         print(f"{DEV_NAMES[d['device']]}: {d['ms']} ms readback, UFM status {d['ufm']}")

@@ -54,7 +54,8 @@ per-unit record where it sets one. The host no longer takes part in the
 limit load.
 
 **New row, ARCH-126 FPGA configuration attestation** (add; allocate the
-number in the architecture): For each of the four MachXO2 devices, reads the
+number in the architecture): For each of the two safety MachXO2 devices (EE
+and OPT; the seed and TA drivers are reported as not checked), reads the
 configuration flash through the configuration interface in transparent mode,
 page by page from the main loop, hashes it with SHA-256 and compares the
 digest with the value compiled into the signed image from the released

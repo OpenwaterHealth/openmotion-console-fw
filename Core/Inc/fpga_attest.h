@@ -8,7 +8,9 @@
  * through OW_FPGA_PROG, and nothing checked at boot that the configuration
  * present was the released bitstream.
  *
- * This module closes the second half. For each of the four devices it
+ * This module closes the second half for the two safety devices (EE and
+ * OPT, the laser interlock); the seed and TA drivers are reported as "not
+ * checked" (decision 2026-10-22). For each attested device it
  *   1. opens the configuration interface in TRANSPARENT mode (user logic
  *      keeps running), resets the configuration address and streams every
  *      configuration page (FPGA_ATTEST_CFG_PAGES x 16 bytes) through SHA-256,
@@ -28,9 +30,8 @@
  * Any mismatch, read failure or invalid record is sticky until the next
  * run passes.
  *
- * Timing at the current 100 kHz I2C clock: one page read is about 2.5 ms
- * (bench measurement to be recorded in docs/fpga-attestation.md), so a device
- * takes about 8 s and the four devices about 32 s after power-on.
+ * Timing: I2C1 runs at fast mode (~385 kHz); the bench figures are in
+ * docs/fpga-attestation.md section 5.
  */
 #ifndef INC_FPGA_ATTEST_H_
 #define INC_FPGA_ATTEST_H_
@@ -61,6 +62,7 @@ typedef enum {
 #define FPGA_ATTEST_ST_UFM_INVALID   0x04U  /* safety record present but invalid or out of bounds */
 #define FPGA_ATTEST_ST_UFM_BLANK     0x08U  /* informational: no safety record provisioned */
 #define FPGA_ATTEST_ST_UFM_VALID     0x10U  /* informational: per-unit limits in force */
+#define FPGA_ATTEST_ST_NOT_CHECKED   0x40U  /* informational: device not in the attested set (seed, TA) */
 #define FPGA_ATTEST_ST_PENDING       0x80U  /* not checked yet in this run */
 #define FPGA_ATTEST_ST_FAULT_MASK    (FPGA_ATTEST_ST_DIGEST | FPGA_ATTEST_ST_READ_FAIL | FPGA_ATTEST_ST_UFM_INVALID)
 
