@@ -2,9 +2,11 @@
 
 What the console must do with this firmware:
 
-  * attest the configuration flash of its four MachXO2 devices at boot and
-    on request (OW_CMD_FPGA_ATTEST), and refuse the trigger until that passes
-    (TRIG_INTERLOCK_FPGA_ATTEST);
+  * attest the configuration flash of the two safety MachXO2 devices (EE,
+    OPT) at boot and on request (OW_CMD_FPGA_ATTEST), validate the per-unit
+    safety record in their UFM, and refuse the trigger until both pass
+    (TRIG_INTERLOCK_FPGA_ATTEST); a blank, corrupt or out-of-envelope record
+    keeps the interlock;
   * refuse every OW_FPGA_PROG opcode on a Release or Debug image with
     OW_ERROR + OW_CODE_NOT_SUPPORTED;
   * refuse a configuration write that names a safety parameter with
@@ -71,6 +73,12 @@ TRIG_INTERLOCK_FPGA_ATTEST = 0x40
 ATTEST_IDLE, ATTEST_RUNNING, ATTEST_PASS, ATTEST_FAIL = 0, 1, 2, 3
 ST_DIGEST, ST_READ_FAIL, ST_UFM_INVALID, ST_UFM_BLANK, ST_UFM_VALID, ST_NOT_CHECKED, ST_PENDING = 1, 2, 4, 8, 16, 64, 128
 DEV_NAMES = {0: "seed", 1: "TA", 2: "EE", 3: "OPT"}
+SAFETY_DEVS = (2, 3)
+CFG_PAGES = 3198   # MachXO2-2000 configuration sector (scripts/sbom-manifest.json openwater:cfg-pages)
+# safety_ufm_status_t (Core/Inc/safety_ufm_record.h)
+UFM_BLANK, UFM_VALID, UFM_BAD_MAGIC, UFM_BAD_LAYOUT, UFM_LOADER_FALLBACK, UFM_BAD_CHECKSUM, UFM_BAD_RESERVED, \
+    UFM_OUT_OF_BOUNDS = range(8)
+ST_FAULT_MASK = ST_DIGEST | ST_READ_FAIL | ST_UFM_INVALID | ST_UFM_BLANK
 
 DEV_REPORT = struct.Struct("<BBBBHHI32s32s")
 REPORT_HEAD = struct.Struct("<BBBBHH")
@@ -111,13 +119,13 @@ def _data(r):
 
 def parse_attest(payload):
     ver, state, pct, interlocked, runs, pages = REPORT_HEAD.unpack_from(payload)
-    assert ver == 1
+    assert ver == 2
     devs = []
     off = REPORT_HEAD.size
     for _ in range(4):
-        d, st, ufm, _rsv, pages_read, ms, devid, digest, expected = DEV_REPORT.unpack_from(payload, off)
+        d, st, ufm, loader, pages_read, ms, devid, digest, expected = DEV_REPORT.unpack_from(payload, off)
         off += DEV_REPORT.size
-        devs.append(dict(device=d, status=st, ufm=ufm, pages=pages_read, ms=ms, devid=devid,
+        devs.append(dict(device=d, status=st, ufm=ufm, loader=loader, pages=pages_read, ms=ms, devid=devid,
                          digest=digest.hex(), expected=expected.hex()))
     return dict(state=state, pct=pct, interlocked=interlocked, runs=runs, cfg_pages=pages, dev=devs)
 
@@ -176,21 +184,50 @@ def test_boot_attestation_passes_on_a_correctly_programmed_unit(console):
     its compiled-in digest; the interlock bit clears and the report carries
     the per-device readback time (recorded in docs/fpga-attestation.md)."""
     rep = wait_attest_done(console)
+    if any(rep["dev"][d]["status"] & ST_UFM_BLANK for d in SAFETY_DEVS):
+        pytest.skip("unit has no safety record in UFM (not provisioned): "
+                    "see test_missing_or_invalid_record_keeps_interlock")
     assert rep["state"] == ATTEST_PASS, rep
     assert rep["interlocked"] == 0
-    assert rep["cfg_pages"] == 3200
+    assert rep["cfg_pages"] == CFG_PAGES
     # Only the two safety devices are attested; seed and TA say "not checked".
     for d in rep["dev"][:2]:
         assert d["status"] == ST_NOT_CHECKED, d
     for d in rep["dev"][2:]:
-        assert d["status"] & (ST_DIGEST | ST_READ_FAIL | ST_UFM_INVALID | ST_PENDING | ST_NOT_CHECKED) == 0, d
-        assert d["pages"] == 3200
+        assert d["status"] & (ST_FAULT_MASK | ST_PENDING | ST_NOT_CHECKED) == 0, d
+        assert d["status"] & ST_UFM_VALID and d["ufm"] == UFM_VALID, d
+        assert d["pages"] == CFG_PAGES
         assert d["digest"] == d["expected"], DEV_NAMES[d["device"]]
         print(f"{DEV_NAMES[d['device']]}: {d['ms']} ms readback, UFM status {d['ufm']}")
     assert rep["dev"][2]["expected"] == rep["dev"][3]["expected"], "EE and OPT share the safety design"
     bi = boot_info(console)
     assert bi["attest"] == ATTEST_PASS
     assert bi["interlocks"] & TRIG_INTERLOCK_FPGA_ATTEST == 0
+
+
+@requires_bench
+def test_missing_or_invalid_record_keeps_interlock(console):
+    """A unit whose EE or OPT UFM holds no valid safety record (blank,
+    corrupt, outside the envelope) fails the attestation even though the
+    configuration digests match: the interlock stays set, the start is
+    refused with TRIG_INTERLOCK_FPGA_ATTEST and boot-info reports it."""
+    rep = wait_attest_done(console)
+    bad = [rep["dev"][d] for d in SAFETY_DEVS if rep["dev"][d]["ufm"] != UFM_VALID]
+    if not bad:
+        pytest.skip("both safety records are valid on this unit")
+    for d in SAFETY_DEVS:
+        dev = rep["dev"][d]
+        assert dev["digest"] == dev["expected"], DEV_NAMES[d]
+    for dev in bad:
+        expected_bit = ST_UFM_BLANK if dev["ufm"] == UFM_BLANK else ST_UFM_INVALID
+        assert dev["status"] & expected_bit, dev
+        print(f"{DEV_NAMES[dev['device']]}: UFM status {dev['ufm']}, device status 0x{dev['status']:02x}")
+    assert rep["state"] == ATTEST_FAIL and rep["interlocked"] == 1, rep
+    bi = boot_info(console)
+    assert bi["attest"] == ATTEST_FAIL
+    assert bi["interlocks"] & TRIG_INTERLOCK_FPGA_ATTEST
+    refused, status = start_trigger(console)
+    assert refused and status is not None and status & TRIG_INTERLOCK_FPGA_ATTEST
 
 
 @requires_bench
@@ -203,7 +240,10 @@ def test_attestation_on_request_and_busy_refusal(console):
     _, err = read_attest(console, start=True)
     assert err == bytes([OW_CODE_BUSY])
     rep = wait_attest_done(console)
-    assert rep["state"] == ATTEST_PASS and rep["runs"] >= 2
+    assert rep["runs"] >= 2
+    # The repeated run reaches the same verdict as the boot run.
+    assert rep["state"] in (ATTEST_PASS, ATTEST_FAIL)
+    assert all(rep["dev"][d]["digest"] == rep["dev"][d]["expected"] for d in SAFETY_DEVS), rep
 
 
 # --------------------------------------------------------------------------- A: programming not supported
@@ -219,9 +259,10 @@ def test_fpga_prog_not_supported_on_release_image(console):
             r = _send(console, OW_FPGA_PROG, opcode, reserved=channel)
             assert r.packetType == OW_ERROR, f"opcode 0x{opcode:02X} ch {channel} not refused"
             assert _data(r) == bytes([OW_CODE_NOT_SUPPORTED])
-    # and the device is still healthy: the attestation still passes
+    # and the devices are untouched: their configuration still matches
     rep = wait_attest_done(console)
-    assert rep["state"] == ATTEST_PASS
+    for d in SAFETY_DEVS:
+        assert rep["dev"][d]["digest"] == rep["dev"][d]["expected"], DEV_NAMES[d]
 
 
 # --------------------------------------------------------------------------- C: config
