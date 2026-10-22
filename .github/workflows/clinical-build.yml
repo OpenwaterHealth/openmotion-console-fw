@@ -115,6 +115,12 @@ jobs:
             bash -lc "git config --global --add safe.directory /workspace && cmake --preset Release && cmake --build build/Release --config Release --target all -j 10"
           test -s "build/Release/${PRODUCT}.bin"
 
+      # A clinical image must contain no FPGA/UFM programming code: those
+      # paths exist only in the Factory preset (PTR-2026-1-5 follow-up).
+      - name: Check the clinical image contains no FPGA programming code
+        run: |
+          docker run --rm             -v "$GITHUB_WORKSPACE":/workspace             -w /workspace             ghcr.io/openwaterhealth/stm32-build-env:latest             bash -lc "scripts/check_release_symbols.sh build/Release/${PRODUCT}.elf"
+
       - name: Resolve bootloader release tag
         id: bl
         run: |

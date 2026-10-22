@@ -9,7 +9,9 @@ Expected output for each test:
 
     <module> host tests OK
 
-These tests are not part of the firmware CMake build. They are a fast sanity check for the pure-data-structure modules; on-hardware verification (full firmware build + bench scan) is still required and is covered by the integration tasks in the corresponding implementation plan.
+`test_fpga_digest` regenerates `generated/fpga_attest_expected.h` with `scripts/gen_fpga_digests.py` (needs `python3`), exactly as the firmware build does, so the digest pipeline is tested against the digests that ship. `test_motion_cfg_keys` is built twice, once with the Release key policy and once with `-DOW_FACTORY_PROGRAMMING=1`.
+
+These tests run in CI (`build-firmware.yml`, inside the build image). They are not part of the firmware CMake build. They are a fast sanity check for the pure-data-structure modules; on-hardware verification (full firmware build + bench scan) is still required and is covered by the integration tasks in the corresponding implementation plan.
 
 ## Requirements
 

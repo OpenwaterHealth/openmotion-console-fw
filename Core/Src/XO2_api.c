@@ -17,6 +17,11 @@
 #include "XO2_cmds.h"
 #include "XO2_api.h"
 
+/* Openwater local change (Core/Src/LOCAL_CHANGES.md): the programming entry
+ * points are compiled only into FACTORY builds (OW_FACTORY_PROGRAMMING). The
+ * read-only entry points (ReadBackCfg, ReadBackUFM, GetHdwInfo, GetHdwStatus,
+ * JEDECinfo, JEDECverify) stay in every build for fpga_attest.c. */
+
 
 
 /**
@@ -50,6 +55,7 @@
  * @see XO2ECA_apiClearXO2()
  * 
  */
+#if defined(OW_FACTORY_PROGRAMMING)
 int XO2ECA_apiProgram(XO2Handle_t *pXO2dev, const XO2_JEDEC_t *pProgJED, int mode)
 {
 	int status, ret;
@@ -428,6 +434,8 @@ int XO2ECA_apiEraseFlash(XO2Handle_t *pXO2dev,  int mode)
 
 
 
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECA_apiProgram, XO2ECA_apiClearXO2, XO2ECA_apiEraseFlash */
+
 /**
  * Display info about JEDEC data structure.
  * @param pXO2dev reference to the XO2 device to access and program
@@ -555,6 +563,7 @@ int XO2ECA_apiReadBackUFM(XO2Handle_t *pXO2dev, int startPg, int numPgs, unsigne
 }
 
 
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Program the UFM area with raw data.
  * Specify the page range to write over.  checking is done to validate the page range.
@@ -640,6 +649,8 @@ int XO2ECA_apiWriteUFM(XO2Handle_t *pXO2dev, int startPg, int numPgs, unsigned c
 }
 
 
+
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECA_apiWriteUFM */
 
 /**
  * Read the DeviceID, USERCODE and TraceID registers in the hardware device.

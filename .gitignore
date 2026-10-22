@@ -57,3 +57,9 @@ docs/superpowers/
 
 # Generated at build time by scripts/gen_sbom.py (never commit)
 sbom.cdx.json
+
+# Host test binaries and the digest header the host tests regenerate
+host_tests/generated/
+host_tests/test_*
+!host_tests/test_*.c
+tests/__pycache__/
