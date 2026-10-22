@@ -40,6 +40,15 @@
 #include "XO2_dev.h"
 #include "XO2_api.h"
 #include "XO2_cmds.h"
+#include "fpga_attest.h"
+#include "safety_params.h"
+#include "safety_ufm_record.h"
+#include "motion_cfg_keys.h"
+
+/* Bus time per main-loop iteration given to the FPGA attestation readback
+ * (about 5 configuration pages at 100 kHz). Keeps command latency and the
+ * 25 ms telemetry cadence within their budgets while the check runs. */
+#define FPGA_ATTEST_BUDGET_MS 12U
 #include "if_fpga_prog.h"
 #include "motion_config.h"
 #include "fpga_register_map.h"
@@ -275,14 +284,27 @@ void delay_ms_wdg(uint32_t ms)
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-/* ---- Safety limits from the stored config (CFW-10) ------------------------
- * Every FPGA register the config sets is range-checked, written and read
- * back. Any failure is reported to the host and refuses Trigger_Start()
- * (TRIG_INTERLOCK_LIMITS) until a later apply succeeds. The SDK writes the
- * same registers at connection through OW_CTRL_I2C_WR with its own read-back
- * (SDK apply_laser_power); this covers the boot and config-write loads. */
-#define PULSE_WIDTH_UL_MAX_US  660.0   /* WI-00015 MAX_PULSE_WIDTH_LIMIT_US */
-#define TA_PULSE_WIDTH_MAX_US  600.0   /* WI-00015 MAX_TA_PULSE_WIDTH_US */
+/* ---- Safety parameters and the laser operating point --------------------
+ * (PTR-2026-1-5 host-writable safety state; CFW-10; SDD ARCH-125/ARCH-83)
+ *
+ * Two kinds of register load, in this order, at boot, after every host
+ * configuration write and after every completed FPGA attestation:
+ *
+ *   1. The SAFETY LOADS: every laser-driver and safety-FPGA limit register,
+ *      from the constants compiled into the firmware (safety_params.h) or,
+ *      for the EE/OPT limits, from a valid per-unit record in the safety
+ *      FPGA's UFM (safety_ufm_record.h). No host data takes part.
+ *   2. The OPERATIONAL point from the stored configuration record:
+ *      TA_CURRENT_DRV, TA_PULSE_WIDTH, SEED_CW_GAIN, SEED_DDS_GAIN, each
+ *      range-checked against the firmware ceilings (lowered by a per-unit
+ *      record). Safety keys and unknown keys in the record are ignored and
+ *      logged (they cannot be stored by this firmware; see motion_config.c).
+ *
+ * Every register is written and read back. Any failure is reported to the
+ * host and refuses Trigger_Start() (TRIG_INTERLOCK_LIMITS) until a later
+ * apply succeeds. The SDK used to write the same registers at connection
+ * through OW_CTRL_I2C_WR; in a Release build those writes are now refused
+ * for the safety-owned registers (fpga_register_map.c). */
 
 static bool     s_limits_fault;
 static unsigned s_limits_fail_count;
@@ -301,22 +323,6 @@ static void limits_fail(const char *key, const char *why)
     }
     s_limits_fail_count++;
     s_limits_fault = true;
-}
-
-/* Value bounds known for a key (the SDK WI-00015 limits); NULL when it passes. */
-static const char *limit_value_problem(const char *key, double val)
-{
-    if (!isfinite(val) || val < 0.0) {
-        return "negative or not a number";
-    }
-    if ((strcmp(key, "EE_PULSE_WIDTH_UL") == 0 || strcmp(key, "OPT_PULSE_WIDTH_UL") == 0) &&
-        val > PULSE_WIDTH_UL_MAX_US) {
-        return "above 660 us";
-    }
-    if (strcmp(key, "TA_PULSE_WIDTH") == 0 && val > TA_PULSE_WIDTH_MAX_US) {
-        return "above 600 us";
-    }
-    return NULL;
 }
 
 /* Write a register and read it back; NULL on success, else the reason. */
@@ -338,51 +344,43 @@ static const char *fpga_write_verify(const FpgaRegister *reg, const uint8_t *dat
     return NULL;
 }
 
-/* Write one FPGA register from a parsed JSON key/value pair (CFW-10):
- * read-only registers are skipped; one-shot commands and status registers are
- * not settings and are refused (EE/OPT DYNAMIC_CTRL bit 0 clears the latched
- * safety faults); the value is range-checked, written and read back. */
-static void apply_fpga_register_setting(const FpgaRegister *reg,
-                                        const char *keybuf,
-                                        const char *tmpval)
+/* Write a raw little-endian register value and read it back. */
+static bool fpga_write_raw(const char *name, uint32_t raw)
 {
-    if (reg->direction == FPGA_DIR_RD) {
-        printf("%s is read-only, skipping write\r\n", keybuf);
-        return;
+    const FpgaRegister *reg = fpga_register_lookup(name);
+    if (reg == NULL || reg->direction != FPGA_DIR_RW || reg->data_len == 0U || reg->data_len > 4U) {
+        limits_fail(name, "not a settable register");
+        return false;
     }
-    if (reg->direction != FPGA_DIR_RW || strstr(keybuf, "STATUS") != NULL ||
-        strstr(keybuf, "DYNAMIC") != NULL || reg->data_len == 0U || reg->data_len > 4U) {
-        limits_fail(keybuf, "not a settable register");
-        return;
+    if (reg->data_len < 4U && raw > ((1UL << (8U * reg->data_len)) - 1UL)) {
+        limits_fail(name, "too large for the register");
+        return false;
     }
-
-    double val = strtod(tmpval, NULL);
-    const char *why = limit_value_problem(keybuf, val);
-    if (why != NULL) {
-        limits_fail(keybuf, why);
-        return;
-    }
-
-    double scale  = (reg->scale != 0.0f) ? (double)reg->scale : 1.0;
-    double scaled = val / scale + 0.5;
-    double maxraw = (reg->data_len >= 4U) ? 4294967295.0 : (double)((1UL << (8U * reg->data_len)) - 1UL);
-    if (scaled > maxraw) {
-        limits_fail(keybuf, "too large for the register");
-        return;
-    }
-
-    uint32_t raw = (uint32_t)scaled;
     uint8_t data_buf[4] = {0, 0, 0, 0};
     for (uint8_t b = 0; b < reg->data_len; b++) {
         data_buf[b] = (uint8_t)((raw >> (8u * b)) & 0xFFu);
     }
-
-    why = fpga_write_verify(reg, data_buf);
+    const char *why = fpga_write_verify(reg, data_buf);
     if (why != NULL) {
-        limits_fail(keybuf, why);
-        return;
+        limits_fail(name, why);
+        return false;
     }
-    printf("Wrote %s -> raw=0x%08lX (len=%u), verified\r\n", keybuf, (unsigned long)raw, reg->data_len);
+    return true;
+}
+
+/* 1. The safety loads (see above). */
+static void apply_safety_loads(void)
+{
+    safety_reg_load_t loads[SAFETY_REG_LOADS_MAX];
+    size_t n = safety_reg_loads(fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_EE),
+                                fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_OPT),
+                                loads, SAFETY_REG_LOADS_MAX);
+    for (size_t i = 0; i < n; i++) {
+        if (fpga_write_raw(loads[i].reg, loads[i].raw)) {
+            printf("Safety %s -> raw=0x%08lX, verified%s\r\n", loads[i].reg,
+                   (unsigned long)loads[i].raw, loads[i].per_unit ? " (per-unit record)" : "");
+        }
+    }
 }
 
 /* Read a little-endian register of up to 4 bytes through the register map. */
@@ -400,8 +398,7 @@ static bool fpga_read_u32(const char *key, uint32_t *out)
     return true;
 }
 
-/* The pulse-width lower limit must not exceed the upper limit, whichever of
- * them the config set (the other keeps its FPGA value). */
+/* The pulse-width lower limit must not exceed the upper limit. */
 static void check_pulse_width_order(const char *ll_key, const char *ul_key)
 {
     uint32_t ll = 0U, ul = 0U;
@@ -413,7 +410,7 @@ static void check_pulse_width_order(const char *ll_key, const char *ul_key)
     }
 }
 
-/* After a config apply: report a limits fault to the host and stop a running
+/* After an apply: report a limits fault to the host and stop a running
  * trigger. Trigger_Start() refuses while it is set. */
 static void report_limits_state(void)
 {
@@ -432,55 +429,69 @@ static void report_limits_state(void)
     (void)Trigger_Stop();
 }
 
-/* Apply TEC_TRIP temperature setpoint from a parsed JSON value string.
- * Returns false (threshold unchanged) when the value is not a number. */
-static bool apply_tec_trip_setting(const char *tmpval)
+/* TEC thermal trip threshold, from a temperature in degrees C. No logging:
+ * it runs before the UART exists (see safety_params_init). */
+static double s_tec_trip_c;
+static void tec_trip_set_c(double trip_c)
 {
-    char *endptr;
-    double TEC_TRIP = strtod(tmpval, &endptr);
-
-    if (endptr == tmpval) {
-        printf("Invalid TEC_TRIP value: %s\r\n", tmpval);
-        return false;
-    }
-
-    printf("TEC_TRIP found: %.3f\r\n", TEC_TRIP);
-
-    double r_th = temperature_to_resistance(TEC_TRIP);
-    TEC_TRIP_VALUE = solve_v(r_th);
-
-    printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, TEC_TRIP_VALUE);
-    return true;
+    s_tec_trip_c = trip_c;
+    TEC_TRIP_VALUE = solve_v(temperature_to_resistance(trip_c));
 }
 
-/* Check the jsmn result for the stored config. Fail LOUDLY on a parse error:
- * a silent failure leaves TEC_TRIP_VALUE at 0, which disarms the TEC thermal
- * trip -- a safety interlock -- so it must be visible both on the serial
- * console and to the host. */
-static bool cfg_parse_ok(int r, const jsmntok_t *tokens, unsigned int ntok)
+/* The compile-time safety parameters, in force from reset: called first
+ * thing in main(), before any peripheral and before the configuration
+ * record is read, so the thermal trip is armed whatever the record holds.
+ * Nothing here may print or touch a peripheral: _write() on the
+ * uninitialised debug UART ends in Error_Handler(). */
+static void safety_params_init(void)
 {
-    if (r < 0) {
-        if (r == JSMN_ERROR_NOMEM) {
-            printf("ERROR: motion config exceeds %u JSON tokens; "
-                   "settings NOT applied (TEC trip NOT armed)\r\n", ntok);
-        } else {
-            printf("ERROR: motion config JSON parse failed (jsmn err %d); "
-                   "settings NOT applied (TEC trip NOT armed)\r\n", r);
-        }
-        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"motion config parse failed; settings not applied\"}";
-        (void)mq_push(msg, strlen(msg));
-        return false;
-    }
-
-    if (r < 1 || tokens[0].type != JSMN_OBJECT) {
-        printf("ERROR: motion config JSON has no root object; "
-               "settings NOT applied (TEC trip NOT armed)\r\n");
-        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"motion config has no root object; settings not applied\"}";
-        (void)mq_push(msg, strlen(msg));
-        return false;
-    }
-    return true;
+    tec_trip_set_c(SAFETY_TEC_TRIP_C);
 }
+
+/* 2. One operational key of the stored record. */
+static void apply_operational_setting(const cfg_key_rule_t *rule, const char *keybuf, double val)
+{
+    double min = rule->min;
+    double max = rule->max;
+    const safety_ufm_limits_t *ee  = fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_EE);
+    const safety_ufm_limits_t *opt = fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_OPT);
+
+    if (strcmp(keybuf, "TA_CURRENT_DRV") == 0) {
+        max = (double)safety_ta_current_drv_max_ma(ee, opt);
+    } else if (strcmp(keybuf, "TA_PULSE_WIDTH") == 0) {
+        max = (double)safety_ta_pulse_width_max_us(ee, opt);
+    }
+    if (!isfinite(val) || val < min || val > max) {
+        limits_fail(keybuf, "out of range");
+        return;
+    }
+    if (rule->reg == NULL) {
+        return;
+    }
+    uint32_t raw = safety_eng_to_raw(rule->reg, val);
+    if (fpga_write_raw(rule->reg, raw)) {
+        printf("Wrote %s -> raw=0x%08lX, verified\r\n", keybuf, (unsigned long)raw);
+    }
+}
+
+#if defined(OW_FACTORY_PROGRAMMING)
+/* Factory build only: a safety key in the stored record overrides the
+ * firmware value, within the hard bounds, for bench and calibration work.
+ * Applied after the safety loads, so it wins. */
+static void apply_factory_override(const cfg_key_rule_t *rule, const char *keybuf, double val)
+{
+    if (!isfinite(val) || val < rule->min || val > rule->max) {
+        limits_fail(keybuf, "override out of bounds");
+        return;
+    }
+    printf("FACTORY override %s = %.3f\r\n", keybuf, val);
+    if (strcmp(keybuf, "TEC_TRIP") == 0) {
+        tec_trip_set_c(val);
+    } else if (rule->reg != NULL) {
+        (void)fpga_write_raw(rule->reg, safety_eng_to_raw(rule->reg, val));
+    }
+}
+#endif
 
 /* Copy one token's text into dst (NUL-terminated, truncated to fit). */
 static void cfg_copy_token(char *dst, size_t dst_size, const char *json, const jsmntok_t *t)
@@ -492,42 +503,39 @@ static void cfg_copy_token(char *dst, size_t dst_size, const char *json, const j
     dst[copy_len] = '\0';
 }
 
-/* Apply one "key": value pair of the stored config: an FPGA register setting
- * or TEC_TRIP. Returns true only when it set a valid TEC_TRIP. */
-static bool cfg_apply_pair(const char *json, const jsmntok_t *key, const jsmntok_t *val)
+/* Apply one "key": value pair of the stored record by its class. */
+static void cfg_apply_pair(const char *json, const jsmntok_t *key, const jsmntok_t *val)
 {
-    char tmpval[64];
-    char keybuf[64];
-
-    cfg_copy_token(tmpval, sizeof(tmpval), json, val);
+    char keybuf[40];
     cfg_copy_token(keybuf, sizeof(keybuf), json, key);
 
-    const FpgaRegister *reg = fpga_register_lookup(keybuf);
-    if (reg != NULL) {
-        apply_fpga_register_setting(reg, keybuf, tmpval);
-        return false;
+    const cfg_key_rule_t *rule = motion_cfg_key_rule(keybuf);
+    if (rule == NULL) {
+        printf("%s: unknown key in the stored config, ignored\r\n", keybuf);
+        return;
     }
-    if (strcmp(keybuf, "TEC_TRIP") == 0) {
-        return apply_tec_trip_setting(tmpval);
+    if (rule->cls == CFG_KEY_OPAQUE) {
+        return;
     }
-    return false;
-}
-
-/* CFW-12: an absent, invalid or zero TEC_TRIP must not pass silently.
- * tec_trip_evaluate() skips the comparison while TEC_TRIP_VALUE is 0.0, so
- * that case disarms the TEC thermal trip. A config without a valid TEC_TRIP
- * keeps the previous threshold, which is reported too. */
-static void report_tec_trip_state(bool tec_trip_set)
-{
-    if (TEC_TRIP_VALUE == 0.0) {
-        printf("ERROR: TEC_TRIP absent, invalid or zero; TEC thermal trip NOT armed\r\n");
-        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"TEC_TRIP absent, invalid or zero; TEC thermal trip not armed\"}";
-        (void)mq_push(msg, strlen(msg));
-    } else if (!tec_trip_set) {
-        printf("WARNING: TEC_TRIP absent or invalid in motion config; previous threshold kept\r\n");
-        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"TEC_TRIP absent or invalid in motion config; previous threshold kept\"}";
-        (void)mq_push(msg, strlen(msg));
+    double v = 0.0;
+    bool is_number = motion_cfg_token_number(json, val, &v);
+    if (rule->cls == CFG_KEY_SAFETY) {
+#if defined(OW_FACTORY_PROGRAMMING)
+        if (is_number) {
+            apply_factory_override(rule, keybuf, v);
+        } else {
+            limits_fail(keybuf, "not a number");
+        }
+#else
+        printf("%s: safety parameter in the stored config ignored (firmware-owned)\r\n", keybuf);
+#endif
+        return;
     }
+    if (!is_number) {
+        limits_fail(keybuf, "not a number");
+        return;
+    }
+    apply_operational_setting(rule, keybuf, v);
 }
 
 void motion_cfg_apply_settings(void)
@@ -546,34 +554,30 @@ void motion_cfg_apply_settings(void)
     s_limits_fail_count = 0U;
     s_limits_first_fail[0] = '\0';
 
+    /* 1. Firmware-owned limits first, whatever the record holds. */
+    printf("TEC_TRIP %.1f C -> %.3f V (compiled in, in force since reset)\r\n", s_tec_trip_c, TEC_TRIP_VALUE);
+    apply_safety_loads();
+
+    /* 2. The operating point from the record. */
     jsmn_init(&parser, NULL);
     int r = jsmn_parse(&parser, json_str, strlen(json_str), tokens, ntok, NULL);
-    if (!cfg_parse_ok(r, tokens, ntok)) {
-        /* Nothing applied: the safety limits are not known to be loaded. */
+    if (r < 1 || tokens[0].type != JSMN_OBJECT) {
+        printf("ERROR: motion config JSON parse failed (jsmn %d); operating point NOT applied\r\n", r);
+        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"motion config parse failed; operating point not applied\"}";
+        (void)mq_push(msg, strlen(msg));
         s_limits_fault = true;
-        (void)Trigger_Stop();
-        return;
-    }
-
-    bool tec_trip_set = false;
-
-    for (int i = 1; i < r; i++) {
-        if (tokens[i].type != JSMN_STRING) { continue; }
-
-        const jsmntok_t *key = &tokens[i];
-        i++;
-        if (i >= r) { break; }
-        if (tokens[i].type != JSMN_PRIMITIVE) { continue; }
-
-        if (cfg_apply_pair(json_str, key, &tokens[i])) {
-            tec_trip_set = true;
+    } else {
+        int i = 1;
+        for (int k = 0; k < tokens[0].size && i + 1 < r; k++) {
+            if (tokens[i].type != JSMN_STRING) { break; }
+            cfg_apply_pair(json_str, &tokens[i], &tokens[i + 1]);
+            i = motion_cfg_skip_token(tokens, r, i + 1);
         }
     }
 
     check_pulse_width_order("EE_PULSE_WIDTH_LL", "EE_PULSE_WIDTH_UL");
     check_pulse_width_order("OPT_PULSE_WIDTH_LL", "OPT_PULSE_WIDTH_UL");
     report_limits_state();
-    report_tec_trip_state(tec_trip_set);
 }
 
 /* USER CODE END 0 */
@@ -586,7 +590,10 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  /* The compile-time safety parameters are in force before anything else
+   * runs: the TEC thermal trip threshold no longer depends on the stored
+   * configuration record (safety_params.h). */
+  safety_params_init();
   /* USER CODE END 1 */
 
   /* MPU Configuration--------------------------------------------------------*/
@@ -675,6 +682,10 @@ int main(void)
        FW_SHA_STRING,
        FW_BUILD_TIME_STRING);
   printf("Board Version: 0x%02X\r\n\r\n", BoardV_Read());
+#if defined(OW_FACTORY_PROGRAMMING)
+  printf("*** FACTORY BUILD: FPGA/UFM programming and safety-parameter overrides are ENABLED.\r\n"
+         "*** Manufacturing and RMA bench use only. Not a clinical image.\r\n\r\n");
+#endif
   printf("CPU Clock Frequency: %lu MHz\r\n", HAL_RCC_GetSysClockFreq() / 1000000);
   printf("Initializing, please wait ...\r\n");
 
@@ -863,6 +874,11 @@ int main(void)
 
   comms_init();
   pdc_poll_init();
+
+  /* FPGA configuration attestation: runs in the background from the main
+   * loop; the trigger cannot be armed until it passes (fpga_attest.h). */
+  fpga_attest_init(&s_xo2_handle);
+  (void)fpga_attest_start();
   /* Start TIM4 interrupt for telemetry polling (250 ms) */
   HAL_TIM_Base_Start_IT(&htim4);
 
@@ -882,6 +898,11 @@ int main(void)
     /* USER CODE BEGIN 3 */
     Trigger_Service();  /* host-loss finish work deferred from the USB ISR (CFW-11) */
     comms_process();
+    fpga_attest_service(FPGA_ATTEST_BUDGET_MS);
+    if (fpga_attest_take_reapply_request()) {
+      /* A completed run (re)established the per-unit limits: reload. */
+      motion_cfg_apply_settings();
+    }
     logging_pump();   /* flush USB-printf log data after command responses */
     telemetry_poll();
     usb_recovery_task();
