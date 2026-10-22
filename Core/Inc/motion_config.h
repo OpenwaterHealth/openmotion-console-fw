@@ -20,7 +20,7 @@ extern "C" {
 //   v3 (PTR-2026-1-5 host-writable safety state): the JSON holds OPERATIONAL
 //       and OPAQUE keys only (motion_cfg_keys.c). The laser-safety parameters
 //       (TEC_TRIP, the EE/OPT limits, the driver clamps) are compiled into the
-//       firmware (safety_params.h) and are no longer part of the record. A v2
+//       firmware (safety_envelope.h) and are no longer part of the record. A v2
 //       record is migrated at load: its operational keys are kept when in
 //       range, its safety and unknown keys are dropped and logged, and it is
 //       rewritten as v3. A v1 record is migrated the same way. A record that
@@ -58,7 +58,7 @@ extern "C" {
 // real (~1 KB) config, so jsmn returned JSMN_ERROR_NOMEM and the firmware
 // skipped applying settings -- which, before v3, left TEC_TRIP_VALUE at 0 and
 // disarmed the TEC thermal trip. The trip threshold no longer depends on the
-// record (safety_params.h), and a parse failure now refuses the trigger and
+// record (safety_envelope.h), and a parse failure now refuses the trigger and
 // is reported. Guarded by host_tests/test_motion_cfg_tokens.c.
 #define MOTION_CFG_MAX_JSON_TOKENS  256U
 

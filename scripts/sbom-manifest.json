@@ -261,15 +261,19 @@
         },
         {
           "name": "openwater:cfg-pages",
-          "value": "3200"
+          "value": "3198"
         },
         {
           "name": "openwater:cfg-digest-sha256",
-          "value": "dcf5f8ef64f80602835f40dbae898f28480989dcb631ff37bc2dc32cc85886be"
+          "value": "c79ede6c19911c9efe95818851e021677bd091e7262edcfab5d3151d6b3b4ad9"
         },
         {
           "name": "openwater:console-device",
           "value": "safety"
+        },
+        {
+          "name": "openwater:ufm-loader",
+          "value": "false"
         },
         {
           "name": "openwater:evidence",
@@ -330,15 +334,19 @@
         },
         {
           "name": "openwater:cfg-pages",
-          "value": "3200"
+          "value": "3198"
         },
         {
           "name": "openwater:cfg-digest-sha256",
-          "value": "8e71816fbabafe9ec8cd86c133e7522c17bb979859cd6a43ff04034a54d6d650"
+          "value": "7104d28d4c24bd7dfade8d4dc8353bc4b1d96f58061cd2abfaaec372fbff68b6"
         },
         {
           "name": "openwater:console-device",
           "value": "seed"
+        },
+        {
+          "name": "openwater:ufm-loader",
+          "value": "false"
         },
         {
           "name": "openwater:evidence",
@@ -399,15 +407,19 @@
         },
         {
           "name": "openwater:cfg-pages",
-          "value": "3200"
+          "value": "3198"
         },
         {
           "name": "openwater:cfg-digest-sha256",
-          "value": "628fc1244b9c429550a366e5974f468b460fd85d723fa42149c7073546f55de6"
+          "value": "d0f5482cee5e893706ef1cefecb42d13d709dc21d53cd14f94ecf77935b0bae0"
         },
         {
           "name": "openwater:console-device",
           "value": "ta"
+        },
+        {
+          "name": "openwater:ufm-loader",
+          "value": "false"
         },
         {
           "name": "openwater:evidence",

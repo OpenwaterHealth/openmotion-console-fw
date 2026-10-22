@@ -24,9 +24,9 @@ test_jsmn_strict: test_jsmn_strict.c ../Core/Src/jsmn.c ../Core/Src/json_strict.
 test_sha256: test_sha256.c ../Core/Src/sha256.c ../Core/Inc/sha256.h
 	$(CC) $(CFLAGS) -o $@ $< ../Core/Src/sha256.c
 
-test_safety_ufm_record: test_safety_ufm_record.c ../Core/Src/safety_ufm_record.c ../Core/Src/safety_params.c \
+test_safety_ufm_record: test_safety_ufm_record.c ../Core/Src/safety_ufm_record.c ../Core/Src/safety_envelope.c \
                         ../Core/Src/fpga_register_map.c ../Core/Src/motion_cfg_keys.c ../Core/Src/jsmn.c
-	$(CC) $(CFLAGS) -o $@ $< ../Core/Src/safety_ufm_record.c ../Core/Src/safety_params.c \
+	$(CC) $(CFLAGS) -o $@ $< ../Core/Src/safety_ufm_record.c ../Core/Src/safety_envelope.c \
 	    ../Core/Src/fpga_register_map.c ../Core/Src/motion_cfg_keys.c ../Core/Src/jsmn.c -lm
 
 # Built twice: with the Release policy (safety keys refused) and with the

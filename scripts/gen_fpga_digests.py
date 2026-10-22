@@ -40,11 +40,14 @@ so the expected digest is::
 
     SHA-256( page[0] || page[1] || ... || page[cfg_pages - 1] )
 
-over the packed JEDEC rows.  ``cfg_pages`` is the configuration-sector size of
-the device (3200 pages for the MachXO2-2000, Lattice ECA ``XO2DevList``).  Rows
-beyond that are the UFM initialisation part of the fuse map; they are NOT
-hashed because the UFM of the safety FPGAs carries the per-unit calibration
-record (see docs/fpga-attestation.md).  The script reports whether those
+over the packed JEDEC rows.  ``cfg_pages`` (manifest openwater:cfg-pages) is
+the configuration-sector size of the device: 3198 pages for the MachXO2-2000.
+The vendored Lattice ECA table ``XO2DevList`` says 3200, but a sequential
+configuration read continues into the UFM after page 3197. On the bench
+(2026-10-22) pages 3198 and 3199 of a 3200-page read returned UFM pages 0 and
+1, i.e. the per-unit safety record. Rows beyond cfg_pages are therefore NOT
+hashed: the UFM carries the per-unit safety record, which the firmware
+validates on its own (see docs/fpga-attestation.md).  The script reports whether those
 trailing rows are blank so a design that starts to use UFM initialisation is
 noticed.
 
@@ -76,6 +79,10 @@ PROP_PAGES = "openwater:cfg-pages"
 PROP_DIGEST = "openwater:cfg-digest-sha256"
 PROP_ROLE = "openwater:role"
 PROP_DEVICE = "openwater:console-device"
+# "true" when the released bitstream contains the safety FPGA's UFM loader
+# (ufm_config.v, status register 0x31); the firmware then also requires the
+# loader to report the record applied. Required on every bitstream component.
+PROP_UFM_LOADER = "openwater:ufm-loader"
 
 
 class DigestError(RuntimeError):
@@ -219,6 +226,7 @@ def write_header(out: Path, entries: list[dict]) -> None:
         lines.append(f"#define FPGA_ATTEST_REPO_{ident} \"{e['repo']}\"")
         hexs = ", ".join(f"0x{e['digest'][i:i + 2]}" for i in range(0, 64, 2))
         lines.append(f"#define FPGA_ATTEST_DIGEST_{ident} {{ {hexs} }}")
+        lines.append(f"#define FPGA_ATTEST_UFM_LOADER_{ident} {1 if e['ufm_loader'] else 0}")
         lines.append("")
     lines += ["#endif /* FPGA_ATTEST_EXPECTED_H */", ""]
     text = "\n".join(lines)
@@ -244,10 +252,13 @@ def main() -> int:
     failures: list[str] = []
     for c in bitstream_components(manifest):
         p = props(c)
-        for key in (PROP_REPO, PROP_TAG, PROP_FILE, PROP_PAGES, PROP_DEVICE):
+        for key in (PROP_REPO, PROP_TAG, PROP_FILE, PROP_PAGES, PROP_DEVICE, PROP_UFM_LOADER):
             if key not in p:
                 failures.append(f"{c.get('name')}: manifest property {key} missing")
         if failures:
+            continue
+        if p[PROP_UFM_LOADER] not in ("true", "false"):
+            failures.append(f"{c['name']}: {PROP_UFM_LOADER} must be \"true\" or \"false\", got {p[PROP_UFM_LOADER]!r}")
             continue
         if c.get("version") != p[PROP_TAG]:
             failures.append(f"{c['name']}: component version {c.get('version')!r} != {PROP_TAG} {p[PROP_TAG]!r}")
@@ -286,7 +297,8 @@ def main() -> int:
             print(f"[gen_fpga_digests] WARNING: {c['name']}: fuse rows beyond the configuration sector are not "
                   f"blank; the design initialises the UFM. Those rows are not attested.")
         entries.append({"device": p[PROP_DEVICE], "repo": p[PROP_REPO], "tag": p[PROP_TAG], "file": p[PROP_FILE],
-                        "file_sha": file_sha, "cfg_pages": int(p[PROP_PAGES]), "digest": digest})
+                        "file_sha": file_sha, "cfg_pages": int(p[PROP_PAGES]), "digest": digest,
+                        "ufm_loader": p[PROP_UFM_LOADER] == "true"})
 
     if failures:
         for f in failures:

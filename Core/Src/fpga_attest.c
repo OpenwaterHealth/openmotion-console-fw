@@ -13,6 +13,8 @@
 #include "main.h"
 #include "XO2_cmds.h"
 #include "XO2_api.h"
+#include "fpga_register_map.h"
+#include "tca9548a.h"
 #include "msg_queue.h"
 #include "sha256.h"
 #include "trigger.h"
@@ -20,17 +22,44 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Only the two safety devices are attested (EE and OPT, both carrying the
- * safety design): they are the laser interlock and bound emission on their
- * own (ARCH-68). The seed and TA drivers are not checked, which keeps the
- * boot-time check to two devices; they cannot be reprogrammed from a Release
- * image either (no programming code). Their report entries say "not
- * checked" and carry no expected digest. Decision 2026-10-22 (bench review). */
-#define FPGA_ATTEST_CHECKED(d) ((d) == (uint8_t)MUX_FPGA_SAFE_EE || (d) == (uint8_t)MUX_FPGA_SAFE_OPT)
-#define FPGA_ATTEST_FIRST      ((uint8_t)MUX_FPGA_SAFE_EE)
-#define FPGA_ATTEST_CHECKED_COUNT 2U
+/* The attested devices, in run order. Only the two safety devices are
+ * attested (EE and OPT, both carrying the safety design): they are the laser
+ * interlock and bound emission on their own (ARCH-68). The seed and TA
+ * drivers are not checked, which keeps the boot-time check to two devices;
+ * they cannot be reprogrammed from a Release image either (no programming
+ * code). Their report entries say "not checked" and carry no expected
+ * digest. Decision 2026-10-22 (bench review). Attesting another device is a
+ * new row here plus its digest from scripts/gen_fpga_digests.py.
+ *
+ * ufm_loader comes from the SBOM manifest (openwater:ufm-loader) of the
+ * released bitstream: when the bitstream contains the safety FPGA's UFM
+ * loader, its status register must also report the record applied. */
+typedef struct {
+    uint8_t        device;             /* mux 0 channel */
+    const uint8_t *expected;           /* SHA256_DIGEST_SIZE bytes */
+    bool           ufm_record;         /* holds the per-unit safety record */
+    bool           ufm_loader;         /* bitstream has ufm_config.v (status 0x31) */
+    const char    *loader_status_reg;  /* fpga_register_map.c name of 0x31 */
+} attest_entry_t;
+
 static const uint8_t s_expected_safety[SHA256_DIGEST_SIZE] = FPGA_ATTEST_DIGEST_SAFETY;
+static const attest_entry_t s_attest[] = {
+    { (uint8_t)MUX_FPGA_SAFE_EE,  s_expected_safety, true, FPGA_ATTEST_UFM_LOADER_SAFETY != 0, "EE_UFM_STATUS"  },
+    { (uint8_t)MUX_FPGA_SAFE_OPT, s_expected_safety, true, FPGA_ATTEST_UFM_LOADER_SAFETY != 0, "OPT_UFM_STATUS" },
+};
+#define ATTEST_COUNT ((uint8_t)(sizeof(s_attest) / sizeof(s_attest[0])))
 static const char *const s_dev_name[FPGA_ATTEST_DEV_COUNT] = { "seed", "TA", "EE", "OPT" };
+
+static const attest_entry_t *entry_for(uint8_t dev)
+{
+    for (uint8_t i = 0; i < ATTEST_COUNT; i++) {
+        if (s_attest[i].device == dev) {
+            return &s_attest[i];
+        }
+    }
+    return NULL;
+}
+#define FPGA_ATTEST_CHECKED(d) (entry_for(d) != NULL)
 
 typedef enum { STEP_OPEN = 0, STEP_PAGES, STEP_FINISH, STEP_UFM, STEP_NEXT } step_t;
 
@@ -38,7 +67,8 @@ static XO2Handle_t *s_h;
 static fpga_attest_state_t s_state = FPGA_ATTEST_IDLE;
 static fpga_attest_report_t s_report;
 static step_t   s_step;
-static uint8_t  s_dev;
+static uint8_t  s_idx;   /* index into s_attest */
+static uint8_t  s_dev;   /* s_attest[s_idx].device */
 static uint16_t s_page;
 static uint32_t s_dev_start_ms;
 static sha256_ctx_t s_sha;
@@ -80,15 +110,17 @@ void fpga_attest_init(XO2Handle_t *h)
     s_h = h;
     s_state = FPGA_ATTEST_IDLE;
     memset(&s_report, 0, sizeof s_report);
-    s_report.struct_version = 1U;
+    s_report.struct_version = 2U;
     s_report.cfg_pages = (uint16_t)FPGA_ATTEST_CFG_PAGES;
     s_report.interlocked = 1U;
     for (uint8_t d = 0; d < FPGA_ATTEST_DEV_COUNT; d++) {
         s_report.dev[d].device = d;
         s_report.dev[d].status = FPGA_ATTEST_CHECKED(d) ? FPGA_ATTEST_ST_PENDING : FPGA_ATTEST_ST_NOT_CHECKED;
         s_report.dev[d].ufm_status = 0xFFU;
-        if (FPGA_ATTEST_CHECKED(d)) {
-            memcpy(s_report.dev[d].expected, s_expected_safety, SHA256_DIGEST_SIZE);
+        s_report.dev[d].loader_status = 0xFFU;
+        const attest_entry_t *e = entry_for(d);
+        if (e != NULL) {
+            memcpy(s_report.dev[d].expected, e->expected, SHA256_DIGEST_SIZE);
         }
     }
 }
@@ -101,6 +133,7 @@ bool fpga_attest_start(void)
     for (uint8_t d = 0; d < FPGA_ATTEST_DEV_COUNT; d++) {
         s_report.dev[d].status = FPGA_ATTEST_CHECKED(d) ? FPGA_ATTEST_ST_PENDING : FPGA_ATTEST_ST_NOT_CHECKED;
         s_report.dev[d].ufm_status = 0xFFU;
+        s_report.dev[d].loader_status = 0xFFU;
         s_report.dev[d].pages_read = 0U;
         s_report.dev[d].elapsed_ms = 0U;
         memset(s_report.dev[d].digest, 0, SHA256_DIGEST_SIZE);
@@ -110,7 +143,8 @@ bool fpga_attest_start(void)
     s_state = FPGA_ATTEST_RUNNING;
     s_report.state = (uint8_t)s_state;
     s_report.interlocked = 1U;
-    s_dev = FPGA_ATTEST_FIRST;
+    s_idx = 0U;
+    s_dev = s_attest[0].device;
     s_step = STEP_OPEN;
     printf("FPGA attestation: started\r\n");
     return true;
@@ -178,7 +212,7 @@ static void step_finish(void)
     sha256_final(&s_sha, s_report.dev[s_dev].digest);
     uint32_t elapsed = HAL_GetTick() - s_dev_start_ms;
     s_report.dev[s_dev].elapsed_ms = (elapsed > 0xFFFFU) ? 0xFFFFU : (uint16_t)elapsed;
-    if (memcmp(s_report.dev[s_dev].digest, s_expected_safety, SHA256_DIGEST_SIZE) != 0) {
+    if (memcmp(s_report.dev[s_dev].digest, s_attest[s_idx].expected, SHA256_DIGEST_SIZE) != 0) {
         dev_fail(FPGA_ATTEST_ST_DIGEST);
     } else {
         s_report.dev[s_dev].status &= (uint8_t)~FPGA_ATTEST_ST_PENDING;
@@ -186,11 +220,23 @@ static void step_finish(void)
     s_step = STEP_UFM;
 }
 
-/* Safety devices: read and validate the per-unit UFM record. A read failure
- * is a read fault; a blank UFM is reported but is not a fault. */
+/* The status register of a loader-capable safety bitstream (0x31). */
+static bool read_loader_status(const attest_entry_t *e, uint8_t *out)
+{
+    const FpgaRegister *reg = fpga_register_lookup(e->loader_status_reg);
+    return reg != NULL &&
+           TCA9548A_Read_Data(reg->muxIdx, reg->channel, reg->i2cAddr, reg->offset, 1U, out) == TCA9548A_OK;
+}
+
+/* Safety devices: read and validate the per-unit UFM record (the unit's
+ * safety record, safety_ufm_record.h). A read failure is a read fault; a
+ * blank, invalid or out-of-envelope record, or a loader bitstream that
+ * reports it did not apply the record, is a record fault. Every one of
+ * them keeps the interlock. */
 static void step_ufm(void)
 {
-    if (s_dev == (uint8_t)MUX_FPGA_SAFE_EE || s_dev == (uint8_t)MUX_FPGA_SAFE_OPT) {
+    const attest_entry_t *e = &s_attest[s_idx];
+    if (e->ufm_record) {
         uint8_t raw[SAFETY_UFM_RECORD_PAGES * XO2_FLASH_PAGE_SIZE];
         select_device(s_dev);
         if (XO2ECA_apiReadBackUFM(s_h, SAFETY_UFM_RECORD_PAGE, SAFETY_UFM_RECORD_PAGES, raw) != OK) {
@@ -198,12 +244,23 @@ static void step_ufm(void)
             dev_fail(FPGA_ATTEST_ST_READ_FAIL);
         } else {
             safety_ufm_status_t st = safety_ufm_record_parse(raw, sizeof raw, s_dev, &s_ufm[s_dev]);
+            bool read_ok = true;
+            if (st == SAFETY_UFM_VALID && e->ufm_loader) {
+                uint8_t ls = 0xFFU;
+                read_ok = read_loader_status(e, &ls);
+                s_report.dev[s_dev].loader_status = ls;
+                if (read_ok && ls != SAFETY_UFM_LOADER_CALIBRATED) {
+                    st = SAFETY_UFM_LOADER_FALLBACK;
+                }
+            }
             s_report.dev[s_dev].ufm_status = (uint8_t)st;
-            if (st == SAFETY_UFM_VALID) {
+            if (!read_ok) {
+                dev_fail(FPGA_ATTEST_ST_READ_FAIL);
+            } else if (st == SAFETY_UFM_VALID) {
                 s_ufm_valid[s_dev] = true;
                 s_report.dev[s_dev].status |= FPGA_ATTEST_ST_UFM_VALID;
             } else if (st == SAFETY_UFM_BLANK) {
-                s_report.dev[s_dev].status |= FPGA_ATTEST_ST_UFM_BLANK;
+                dev_fail(FPGA_ATTEST_ST_UFM_BLANK);
             } else {
                 dev_fail(FPGA_ATTEST_ST_UFM_INVALID);
             }
@@ -282,19 +339,18 @@ void fpga_attest_service(uint32_t budget_ms)
     case STEP_UFM:    step_ufm(); break;
     case STEP_NEXT:
     default:
-        do {
-            s_dev++;
-        } while (s_dev < FPGA_ATTEST_DEV_COUNT && !FPGA_ATTEST_CHECKED(s_dev));
-        if (s_dev >= FPGA_ATTEST_DEV_COUNT) {
+        s_idx++;
+        if (s_idx >= ATTEST_COUNT) {
             run_finished();
         } else {
+            s_dev = s_attest[s_idx].device;
             s_step = STEP_OPEN;
         }
         break;
     }
     if (s_state == FPGA_ATTEST_RUNNING) {
-        uint32_t done = (uint32_t)(s_dev - FPGA_ATTEST_FIRST) * FPGA_ATTEST_CFG_PAGES + s_page;
-        s_report.progress_pct = (uint8_t)((done * 100U) / (FPGA_ATTEST_CHECKED_COUNT * FPGA_ATTEST_CFG_PAGES));
+        uint32_t done = (uint32_t)s_idx * FPGA_ATTEST_CFG_PAGES + s_page;
+        s_report.progress_pct = (uint8_t)((done * 100U) / ((uint32_t)ATTEST_COUNT * FPGA_ATTEST_CFG_PAGES));
     }
     watchdog_refresh();
 }

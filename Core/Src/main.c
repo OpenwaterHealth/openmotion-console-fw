@@ -41,7 +41,7 @@
 #include "XO2_api.h"
 #include "XO2_cmds.h"
 #include "fpga_attest.h"
-#include "safety_params.h"
+#include "safety_envelope.h"
 #include "safety_ufm_record.h"
 #include "motion_cfg_keys.h"
 
@@ -290,15 +290,19 @@ void delay_ms_wdg(uint32_t ms)
  * Two kinds of register load, in this order, at boot, after every host
  * configuration write and after every completed FPGA attestation:
  *
- *   1. The SAFETY LOADS: every laser-driver and safety-FPGA limit register,
- *      from the constants compiled into the firmware (safety_params.h) or,
- *      for the EE/OPT limits, from a valid per-unit record in the safety
- *      FPGA's UFM (safety_ufm_record.h). No host data takes part.
+ *   1. The SAFETY LOADS: the EE/OPT limit registers from the per-unit
+ *      safety record in each safety FPGA's UFM (safety_ufm_record.h, bounded
+ *      by safety_envelope.h), and the fixed TA / seed driver clamps of
+ *      safety_envelope.h. No host data takes part. A device without a valid
+ *      record gets no limit loads: its registers keep the design reset
+ *      values, and the attestation interlock keeps the laser off.
  *   2. The OPERATIONAL point from the stored configuration record:
  *      TA_CURRENT_DRV, TA_PULSE_WIDTH, SEED_CW_GAIN, SEED_DDS_GAIN, each
- *      range-checked against the firmware ceilings (lowered by a per-unit
- *      record). Safety keys and unknown keys in the record are ignored and
- *      logged (they cannot be stored by this firmware; see motion_config.c).
+ *      range-checked against the envelope, lowered by the unit's record
+ *      (motion_cfg_set_unit_ceiling: the same ceilings apply to host config
+ *      writes and to the I2C pass-through). Safety keys and unknown keys in
+ *      the record are ignored and logged (they cannot be stored by this
+ *      firmware; see motion_config.c).
  *
  * Every register is written and read back. Any failure is reported to the
  * host and refuses Trigger_Start() (TRIG_INTERLOCK_LIMITS) until a later
@@ -368,13 +372,21 @@ static bool fpga_write_raw(const char *name, uint32_t raw)
     return true;
 }
 
-/* 1. The safety loads (see above). */
+/* 1. The safety loads (see above), and the unit's ceilings for the
+ *    operating point. */
 static void apply_safety_loads(void)
 {
+    const safety_ufm_limits_t *ee  = fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_EE);
+    const safety_ufm_limits_t *opt = fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_OPT);
     safety_reg_load_t loads[SAFETY_REG_LOADS_MAX];
-    size_t n = safety_reg_loads(fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_EE),
-                                fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_OPT),
-                                loads, SAFETY_REG_LOADS_MAX);
+    size_t n = safety_reg_loads(ee, opt, loads, SAFETY_REG_LOADS_MAX);
+
+    if (ee == NULL || opt == NULL) {
+        printf("Safety record: EE %s, OPT %s; a device without one keeps its design limits and the laser stays interlocked\r\n",
+               ee ? "valid" : "none", opt ? "valid" : "none");
+    }
+    motion_cfg_set_unit_ceiling("TA_CURRENT_DRV", safety_ta_current_drv_max_ma(ee));
+    motion_cfg_set_unit_ceiling("TA_PULSE_WIDTH", safety_ta_pulse_width_max_us(ee, opt));
     for (size_t i = 0; i < n; i++) {
         if (fpga_write_raw(loads[i].reg, loads[i].raw)) {
             printf("Safety %s -> raw=0x%08lX, verified%s\r\n", loads[i].reg,
@@ -430,7 +442,7 @@ static void report_limits_state(void)
 }
 
 /* TEC thermal trip threshold, from a temperature in degrees C. No logging:
- * it runs before the UART exists (see safety_params_init). */
+ * it runs before the UART exists (see safety_envelope_init). */
 static double s_tec_trip_c;
 static void tec_trip_set_c(double trip_c)
 {
@@ -443,7 +455,7 @@ static void tec_trip_set_c(double trip_c)
  * record is read, so the thermal trip is armed whatever the record holds.
  * Nothing here may print or touch a peripheral: _write() on the
  * uninitialised debug UART ends in Error_Handler(). */
-static void safety_params_init(void)
+static void safety_envelope_init(void)
 {
     tec_trip_set_c(SAFETY_TEC_TRIP_C);
 }
@@ -452,15 +464,7 @@ static void safety_params_init(void)
 static void apply_operational_setting(const cfg_key_rule_t *rule, const char *keybuf, double val)
 {
     double min = rule->min;
-    double max = rule->max;
-    const safety_ufm_limits_t *ee  = fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_EE);
-    const safety_ufm_limits_t *opt = fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_OPT);
-
-    if (strcmp(keybuf, "TA_CURRENT_DRV") == 0) {
-        max = (double)safety_ta_current_drv_max_ma(ee, opt);
-    } else if (strcmp(keybuf, "TA_PULSE_WIDTH") == 0) {
-        max = (double)safety_ta_pulse_width_max_us(ee, opt);
-    }
+    double max = motion_cfg_effective_max(rule);   /* lowered by the unit's record (apply_safety_loads) */
     if (!isfinite(val) || val < min || val > max) {
         limits_fail(keybuf, "out of range");
         return;
@@ -592,8 +596,8 @@ int main(void)
   /* USER CODE BEGIN 1 */
   /* The compile-time safety parameters are in force before anything else
    * runs: the TEC thermal trip threshold no longer depends on the stored
-   * configuration record (safety_params.h). */
-  safety_params_init();
+   * configuration record (safety_envelope.h). */
+  safety_envelope_init();
   /* USER CODE END 1 */
 
   /* MPU Configuration--------------------------------------------------------*/

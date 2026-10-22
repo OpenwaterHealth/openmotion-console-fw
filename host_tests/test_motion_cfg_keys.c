@@ -15,7 +15,7 @@
 #include "jsmn.h"
 #include "motion_cfg_keys.h"
 #include "fpga_register_map.h"
-#include "safety_params.h"
+#include "safety_envelope.h"
 
 #define NTOK 256
 
@@ -92,6 +92,9 @@ int main(void)
     /* a Factory host write: safety keys within the hard bounds */
     assert(check("{\"TEC_TRIP\":40,\"EE_DRIVE_CL\":4287,\"EE_PULSE_WIDTH_UL\":550}", true, why) == CFG_CHECK_OK);
     assert(check("{\"TEC_TRIP\":61}", true, why) == CFG_CHECK_BAD_VALUE);
+    /* the envelope can only be tightened: the trip may only move down */
+    assert(check("{\"TEC_TRIP\":40.5}", true, why) == CFG_CHECK_BAD_VALUE);
+    assert(check("{\"TEC_TRIP\":35}", true, why) == CFG_CHECK_OK);
     assert(check("{\"TEC_TRIP\":19}", true, why) == CFG_CHECK_BAD_VALUE);
     assert(check("{\"EE_DRIVE_CL\":5001}", true, why) == CFG_CHECK_BAD_VALUE);
     assert(check("{\"EE_PULSE_WIDTH_UL\":661}", true, why) == CFG_CHECK_BAD_VALUE);
@@ -175,6 +178,29 @@ int main(void)
         assert(fpga_passthrough_write_problem(1, 4, 0x41, 0x14, 1, one, false) != NULL);
         assert(fpga_passthrough_write_problem(1, 4, 0x41, 0x05, 1, one, false) != NULL);
         assert(fpga_passthrough_write_problem(1, 1, 0x49, 0x05, 1, one, false) == NULL);
+    }
+
+    /* per-unit ceilings from the safety record lower the operating point's
+     * range for host writes and the pass-through, and never raise it */
+    {
+        uint8_t v4200[2] = { 0x8A, 0x66 };   /* 4200 mA */
+        assert(check("{\"TA_CURRENT_DRV\":4200,\"TA_PULSE_WIDTH\":500}", false, why) == CFG_CHECK_OK);
+        motion_cfg_set_unit_ceiling("TA_CURRENT_DRV", 4100.0);
+        motion_cfg_set_unit_ceiling("TA_PULSE_WIDTH", 480.0);
+        assert(check("{\"TA_CURRENT_DRV\":4200}", false, why) == CFG_CHECK_BAD_VALUE);
+        assert(strcmp(why, "TA_CURRENT_DRV: out of range") == 0);
+        assert(check("{\"TA_PULSE_WIDTH\":500}", false, why) == CFG_CHECK_BAD_VALUE);
+        assert(check("{\"TA_CURRENT_DRV\":4100,\"TA_PULSE_WIDTH\":480}", false, why) == CFG_CHECK_OK);
+        assert(strcmp(fpga_passthrough_write_problem(1, 4, 0x41, 0x06, 2, v4200, false), "value out of range") == 0);
+        /* a ceiling above the envelope bound leaves the bound */
+        motion_cfg_set_unit_ceiling("TA_CURRENT_DRV", 9000.0);
+        assert(motion_cfg_effective_max(motion_cfg_key_rule("TA_CURRENT_DRV")) == (double)SAFETY_TA_CURRENT_DRV_MAX_MA);
+        assert(check("{\"TA_CURRENT_DRV\":5001}", false, why) == CFG_CHECK_BAD_VALUE);
+        assert(fpga_passthrough_write_problem(1, 4, 0x41, 0x06, 2, v4200, false) == NULL);
+        /* only operational keys take a ceiling */
+        motion_cfg_set_unit_ceiling("EE_DRIVE_CL", 1.0);
+        assert(motion_cfg_effective_max(motion_cfg_key_rule("EE_DRIVE_CL")) == (double)SAFETY_EE_DRIVE_CL_MAX_MA);
+        motion_cfg_set_unit_ceiling("TA_PULSE_WIDTH", (double)SAFETY_TA_PULSE_WIDTH_MAX_US);
     }
 
     printf("motion_cfg_keys host tests OK\n");

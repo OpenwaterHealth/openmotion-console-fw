@@ -6,7 +6,7 @@
  *
  *   OPERATIONAL  host-writable, numeric, validated against [min, max] in the
  *                engineering units of fpga_register_map.c;
- *   SAFETY       owned by the firmware (safety_params.h, safety FPGA UFM
+ *   SAFETY       owned by the firmware (safety_envelope.h, safety FPGA UFM
  *                record). Rejected in Release and Debug builds; accepted
  *                within [min, max] only when the build defines
  *                OW_FACTORY_PROGRAMMING (CMake preset "Factory"), for bench
@@ -58,6 +58,15 @@ typedef enum {
 
 /* True when this build accepts safety keys from a host (Factory builds). */
 bool motion_cfg_safety_keys_writable(void);
+
+/* Lower an operational key's ceiling for this unit (the per-unit safety
+ * record: TA_CURRENT_DRV <= EE_DRIVE_CL, TA_PULSE_WIDTH <= EE/OPT
+ * PULSE_WIDTH_UL). Never raises it above the rule's max. Applies to host
+ * config writes, the stored-record apply and the I2C pass-through. */
+void motion_cfg_set_unit_ceiling(const char *name, double max);
+
+/* The rule's max, lowered by a per-unit ceiling. */
+double motion_cfg_effective_max(const cfg_key_rule_t *rule);
 
 /* Rule for a key, or NULL when the key is not in the allow-list. */
 const cfg_key_rule_t *motion_cfg_key_rule(const char *name);

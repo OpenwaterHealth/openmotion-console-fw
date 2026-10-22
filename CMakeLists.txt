@@ -39,7 +39,7 @@ option(BARE_METAL "Build a bare-metal image (no custom bootloader; runs at 0x080
 # OFF (default, every Release and Debug build): the FPGA/UFM programming
 #      service (OW_FPGA_PROG) and the Lattice programming entry points are
 #      compiled OUT of the image, and the laser-safety parameters are
-#      firmware-owned (safety_params.h): a host cannot set them.
+#      firmware-owned (safety_envelope.h): a host cannot set them.
 # ON  (CMake preset "Factory" / "Factory-BareMetal" only): programming and
 #      safety-parameter overrides are compiled in for manufacturing and RMA
 #      bench work. Never built for an rc/final tag (clinical-build.yml builds
@@ -209,7 +209,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/flash_eeprom.c
     Core/Src/motion_config.c
     Core/Src/motion_cfg_keys.c
-    Core/Src/safety_params.c
+    Core/Src/safety_envelope.c
     Core/Src/safety_ufm_record.c
     Core/Src/sha256.c
     Core/Src/fpga_attest.c

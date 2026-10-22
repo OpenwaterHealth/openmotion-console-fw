@@ -1,6 +1,6 @@
 #include "fpga_register_map.h"
 #include "motion_cfg_keys.h"
-#include "safety_params.h"
+#include "safety_envelope.h"
 #include <string.h>
 
 /* Flat register map keyed by friendlyName.
@@ -67,6 +67,7 @@ static const FpgaRegisterEntry fpga_register_table[] = {
     { "EE_MINOR",          { 1, 6, 1, 0x41, 0x26, FPGA_DIR_RD, 1.0f    } },
     { "EE_MAJOR",          { 1, 6, 1, 0x41, 0x27, FPGA_DIR_RD, 1.0f    } },
     { "EE_ID",             { 1, 6, 1, 0x41, 0x28, FPGA_DIR_RD, 1.0f    } },
+    { "EE_UFM_STATUS",     { 1, 6, 1, 0x41, 0x31, FPGA_DIR_RD, 1.0f    } },  /* UFM loader bitstreams only (safety_ufm_record.h) */
 
     /* ── Safety OPT ──────────────────────────────────────────────────────── */
     { "OPT_PULSE_WIDTH_LL", { 1, 7, 4, 0x41, 0x00, FPGA_DIR_RW, 0.320f  } },
@@ -88,6 +89,7 @@ static const FpgaRegisterEntry fpga_register_table[] = {
     { "OPT_MINOR",          { 1, 7, 1, 0x41, 0x26, FPGA_DIR_RD, 1.0f    } },
     { "OPT_MAJOR",          { 1, 7, 1, 0x41, 0x27, FPGA_DIR_RD, 1.0f    } },
     { "OPT_ID",             { 1, 7, 1, 0x41, 0x28, FPGA_DIR_RD, 1.0f    } },
+    { "OPT_UFM_STATUS",     { 1, 7, 1, 0x41, 0x31, FPGA_DIR_RD, 1.0f    } },  /* UFM loader bitstreams only */
 };
 
 #define FPGA_REGISTER_TABLE_SIZE \
@@ -132,7 +134,7 @@ static double passthrough_value(const FpgaRegister *r, const uint8_t *data, uint
 }
 
 /* Ownership and range (PTR-2026-1-5 follow-up): a register the firmware owns
-   (the limits of safety_params.h, the driver clamps, the static control
+   (the limits of safety_envelope.h, the driver clamps, the static control
    words: the CFG_KEY_SAFETY and unlisted keys) is refused unless the build is
    a Factory build; an operational register is accepted only within its
    allow-list range. NULL when allowed. */
@@ -149,7 +151,7 @@ static const char *passthrough_ownership_problem(const FpgaRegisterEntry *e,
         return NULL; /* Factory build: unlisted writable register, bench use */
     }
     double v = passthrough_value(&e->reg, data, len);
-    return (v < rule->min || v > rule->max) ? "value out of range" : NULL;
+    return (v < rule->min || v > motion_cfg_effective_max(rule)) ? "value out of range" : NULL;
 }
 
 const char *fpga_passthrough_write_problem(int mux, int channel, uint8_t i2c_addr,

@@ -2,7 +2,7 @@
  * motion_cfg_keys.c - allow-list of configuration keys (see the header).
  */
 #include "motion_cfg_keys.h"
-#include "safety_params.h"
+#include "safety_envelope.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -11,8 +11,9 @@
 
 /* Bounds are the engineering units of fpga_register_map.c (us, mA) or the
  * key's own unit (TEC_TRIP: degrees C). The SAFETY rows exist so a Factory
- * build can take a per-unit override from the bench tooling within the hard
- * bounds of safety_params.h; in every other build they are refused. */
+ * build can take an override from the bench tooling within the envelope of
+ * safety_envelope.h (never looser than it); in every other build they are
+ * refused. */
 static const cfg_key_rule_t rules[] = {
     /* ---- operational: the per-unit laser operating point (WI-00015 laser calibration) */
     { "TA_CURRENT_DRV",     CFG_KEY_OPERATIONAL, SAFETY_TA_CURRENT_DRV_MIN_MA, SAFETY_TA_CURRENT_DRV_MAX_MA, "TA_CURRENT_DRV" },
@@ -23,24 +24,24 @@ static const cfg_key_rule_t rules[] = {
     /* ---- opaque host data */
     { "calibration",        CFG_KEY_OPAQUE,      0.0,  0.0, NULL },
 
-    /* ---- safety: firmware-owned (safety_params.h); Factory-build override only */
+    /* ---- safety: firmware-owned (safety_envelope.h, UFM record); Factory-build override only */
     { "TEC_TRIP",           CFG_KEY_SAFETY, SAFETY_TEC_TRIP_MIN_C, SAFETY_TEC_TRIP_MAX_C, NULL },
-    { "EE_PULSE_WIDTH_LL",  CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PULSE_WIDTH_UL_US, "EE_PULSE_WIDTH_LL" },
-    { "EE_PULSE_WIDTH_UL",  CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PULSE_WIDTH_UL_US, "EE_PULSE_WIDTH_UL" },
+    { "EE_PULSE_WIDTH_LL",  CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PULSE_WIDTH_UL_MAX_US, "EE_PULSE_WIDTH_LL" },
+    { "EE_PULSE_WIDTH_UL",  CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PULSE_WIDTH_UL_MAX_US, "EE_PULSE_WIDTH_UL" },
     { "EE_RATE_LL",         CFG_KEY_SAFETY, SAFETY_EE_OPT_RATE_LL_MIN_US, 4294967295.0, "EE_RATE_LL" },
-    { "EE_DRIVE_CL",        CFG_KEY_SAFETY, 1.0, SAFETY_EE_OPT_DRIVE_CL_MA, "EE_DRIVE_CL" },
-    { "EE_THRESH",          CFG_KEY_SAFETY, 1.0, SAFETY_EE_OPT_DRIVE_CL_MA, "EE_DRIVE_CL" },
+    { "EE_DRIVE_CL",        CFG_KEY_SAFETY, 1.0, SAFETY_EE_DRIVE_CL_MAX_MA, "EE_DRIVE_CL" },
+    { "EE_THRESH",          CFG_KEY_SAFETY, 1.0, SAFETY_EE_DRIVE_CL_MAX_MA, "EE_DRIVE_CL" },
     { "EE_GAIN",            CFG_KEY_SAFETY, 0.0, 100.0, NULL },
-    { "EE_PWM_CURRENT",     CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PWM_CURRENT_MA, "EE_PWM_CURRENT" },
-    { "EE_CW_CURRENT",      CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_CW_CURRENT_MA,  "EE_CW_CURRENT" },
-    { "OPT_PULSE_WIDTH_LL", CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PULSE_WIDTH_UL_US, "OPT_PULSE_WIDTH_LL" },
-    { "OPT_PULSE_WIDTH_UL", CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PULSE_WIDTH_UL_US, "OPT_PULSE_WIDTH_UL" },
+    { "EE_PWM_CURRENT",     CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PWM_CURRENT_MAX_MA, "EE_PWM_CURRENT" },
+    { "EE_CW_CURRENT",      CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_CW_CURRENT_MAX_MA,  "EE_CW_CURRENT" },
+    { "OPT_PULSE_WIDTH_LL", CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PULSE_WIDTH_UL_MAX_US, "OPT_PULSE_WIDTH_LL" },
+    { "OPT_PULSE_WIDTH_UL", CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PULSE_WIDTH_UL_MAX_US, "OPT_PULSE_WIDTH_UL" },
     { "OPT_RATE_LL",        CFG_KEY_SAFETY, SAFETY_EE_OPT_RATE_LL_MIN_US, 4294967295.0, "OPT_RATE_LL" },
     { "OPT_DRIVE_CL",       CFG_KEY_SAFETY, 1.0, SAFETY_OPT_DRIVE_CL_MAX, "OPT_DRIVE_CL" },
     { "OPT_THRESH",         CFG_KEY_SAFETY, 1.0, SAFETY_OPT_DRIVE_CL_MAX, "OPT_DRIVE_CL" },
     { "OPT_GAIN",           CFG_KEY_SAFETY, 0.0, 100.0, NULL },
-    { "OPT_PWM_CURRENT",    CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PWM_CURRENT_MA, "OPT_PWM_CURRENT" },
-    { "OPT_CW_CURRENT",     CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_CW_CURRENT_MA,  "OPT_CW_CURRENT" },
+    { "OPT_PWM_CURRENT",    CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_PWM_CURRENT_MAX_MA, "OPT_PWM_CURRENT" },
+    { "OPT_CW_CURRENT",     CFG_KEY_SAFETY, 0.0, SAFETY_EE_OPT_CW_CURRENT_MAX_MA,  "OPT_CW_CURRENT" },
     { "TA_PERIOD",          CFG_KEY_SAFETY, 0.0, 5368709.0, "TA_PERIOD" },
     { "TA_CURRENT_LIMIT",   CFG_KEY_SAFETY, 0.0, SAFETY_TA_CURRENT_LIMIT_MA, "TA_CURRENT_LIMIT" },
     { "TA_PWM_MON_CL",      CFG_KEY_SAFETY, 0.0, 32767.0, "TA_PWM_MON_CL" },
@@ -50,6 +51,43 @@ static const cfg_key_rule_t rules[] = {
 };
 
 #define RULE_COUNT (sizeof(rules) / sizeof(rules[0]))
+
+/* Per-unit ceilings below a rule's max (motion_cfg_set_unit_ceiling). */
+#define UNIT_CEILINGS_MAX 4U
+static struct { const cfg_key_rule_t *rule; double max; } s_unit_ceilings[UNIT_CEILINGS_MAX];
+
+void motion_cfg_set_unit_ceiling(const char *name, double max)
+{
+    const cfg_key_rule_t *rule = motion_cfg_key_rule(name);
+    if (rule == NULL || rule->cls != CFG_KEY_OPERATIONAL) {
+        return;
+    }
+    size_t free_slot = UNIT_CEILINGS_MAX;
+    for (size_t i = 0; i < UNIT_CEILINGS_MAX; i++) {
+        if (s_unit_ceilings[i].rule == rule) {
+            s_unit_ceilings[i].max = max;
+            return;
+        }
+        if (s_unit_ceilings[i].rule == NULL && free_slot == UNIT_CEILINGS_MAX) {
+            free_slot = i;
+        }
+    }
+    if (free_slot < UNIT_CEILINGS_MAX) {
+        s_unit_ceilings[free_slot].rule = rule;
+        s_unit_ceilings[free_slot].max = max;
+    }
+}
+
+double motion_cfg_effective_max(const cfg_key_rule_t *rule)
+{
+    double m = rule->max;
+    for (size_t i = 0; i < UNIT_CEILINGS_MAX; i++) {
+        if (s_unit_ceilings[i].rule == rule && s_unit_ceilings[i].max < m) {
+            m = s_unit_ceilings[i].max;
+        }
+    }
+    return m;
+}
 
 bool motion_cfg_safety_keys_writable(void)
 {
@@ -167,7 +205,7 @@ static cfg_check_t check_pair(const char *js, const char *key, const jsmntok_t *
         explain(why, why_len, key, "not a finite number");
         return CFG_CHECK_BAD_VALUE;
     }
-    if (v < rule->min || v > rule->max) {
+    if (v < rule->min || v > motion_cfg_effective_max(rule)) {
         explain(why, why_len, key, "out of range");
         return CFG_CHECK_BAD_VALUE;
     }

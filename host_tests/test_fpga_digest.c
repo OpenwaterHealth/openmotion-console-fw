@@ -97,7 +97,7 @@ int main(void)
         static const uint8_t zero[32] = {0};
         assert(memcmp(s, d, 32) != 0 && memcmp(s, t, 32) != 0 && memcmp(d, t, 32) != 0);
         assert(memcmp(s, zero, 32) != 0 && memcmp(d, zero, 32) != 0 && memcmp(t, zero, 32) != 0);
-        assert(PAGES == 3200U && PAGE == 16U);
+        assert(PAGES == 3198U && PAGE == 16U);   /* MachXO2-2000 configuration sector; page 3198 is UFM page 0 */
         assert(strlen(FPGA_ATTEST_TAG_SAFETY) > 0 && strlen(FPGA_ATTEST_TAG_SEED) > 0 && strlen(FPGA_ATTEST_TAG_TA) > 0);
     }
 

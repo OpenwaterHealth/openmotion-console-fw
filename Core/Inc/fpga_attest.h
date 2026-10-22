@@ -20,15 +20,18 @@
  *      scripts/gen_fpga_digests.py from the released .jed artefacts recorded
  *      in scripts/sbom-manifest.json);
  *   3. for the two safety devices additionally reads the per-unit UFM
- *      calibration record (safety_ufm_record.h) and validates it.
+ *      safety record (safety_ufm_record.h) and validates it against the
+ *      envelope (safety_envelope.h); when the released bitstream contains
+ *      the FPGA's own UFM loader (SBOM openwater:ufm-loader), also requires
+ *      its status register 0x31 to read 0x2F (record applied).
  *
  * The check runs in the background from the main loop (fpga_attest_service),
  * a few pages per call, so the console enumerates and answers commands while
  * it runs; the trigger cannot be armed until it has passed
  * (TRIG_INTERLOCK_FPGA_ATTEST). It starts once at boot and again on host
  * request (OW_CMD_FPGA_ATTEST, reserved = 1); it never starts inside a scan.
- * Any mismatch, read failure or invalid record is sticky until the next
- * run passes.
+ * Any mismatch, read failure, blank or invalid record is sticky until the
+ * next run passes.
  *
  * Timing: I2C1 runs at fast mode (~385 kHz); the bench figures are in
  * docs/fpga-attestation.md section 5.
@@ -59,19 +62,19 @@ typedef enum {
 #define FPGA_ATTEST_ST_OK            0x00U
 #define FPGA_ATTEST_ST_DIGEST        0x01U  /* configuration digest mismatch */
 #define FPGA_ATTEST_ST_READ_FAIL     0x02U  /* configuration interface or page read failed */
-#define FPGA_ATTEST_ST_UFM_INVALID   0x04U  /* safety record present but invalid or out of bounds */
-#define FPGA_ATTEST_ST_UFM_BLANK     0x08U  /* informational: no safety record provisioned */
+#define FPGA_ATTEST_ST_UFM_INVALID   0x04U  /* safety record invalid, outside the envelope, or not applied by the FPGA loader */
+#define FPGA_ATTEST_ST_UFM_BLANK     0x08U  /* no safety record provisioned (UFM blank) */
 #define FPGA_ATTEST_ST_UFM_VALID     0x10U  /* informational: per-unit limits in force */
 #define FPGA_ATTEST_ST_NOT_CHECKED   0x40U  /* informational: device not in the attested set (seed, TA) */
 #define FPGA_ATTEST_ST_PENDING       0x80U  /* not checked yet in this run */
-#define FPGA_ATTEST_ST_FAULT_MASK    (FPGA_ATTEST_ST_DIGEST | FPGA_ATTEST_ST_READ_FAIL | FPGA_ATTEST_ST_UFM_INVALID)
+#define FPGA_ATTEST_ST_FAULT_MASK    (FPGA_ATTEST_ST_DIGEST | FPGA_ATTEST_ST_READ_FAIL |                                       FPGA_ATTEST_ST_UFM_INVALID | FPGA_ATTEST_ST_UFM_BLANK)
 
 /* OW_CMD_FPGA_ATTEST reply, packed little-endian. */
 typedef struct __attribute__((packed)) {
     uint8_t  device;          /* mux 0 channel: 0 seed, 1 TA, 2 EE, 3 OPT */
     uint8_t  status;          /* FPGA_ATTEST_ST_* */
     uint8_t  ufm_status;      /* safety_ufm_status_t (safety devices), 0xFF for others */
-    uint8_t  reserved;
+    uint8_t  loader_status;   /* FPGA register 0x31 on a loader bitstream (0x2F = applied), 0xFF when not read */
     uint16_t pages_read;
     uint16_t elapsed_ms;      /* configuration readback time of the last run */
     uint32_t devid;           /* Lattice device ID read before the open (0 when unreadable) */
@@ -80,7 +83,7 @@ typedef struct __attribute__((packed)) {
 } fpga_attest_dev_report_t;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  struct_version;  /* 1 */
+    uint8_t  struct_version;  /* 2: loader_status (was reserved), blank UFM is a fault */
     uint8_t  state;           /* fpga_attest_state_t */
     uint8_t  progress_pct;    /* 0..100 of the current/last run */
     uint8_t  interlocked;     /* 1 while TRIG_INTERLOCK_FPGA_ATTEST is set */
