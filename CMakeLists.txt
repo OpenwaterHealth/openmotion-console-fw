@@ -33,6 +33,24 @@ endif()
 #                bootloader (0x1FF09800).
 option(BARE_METAL "Build a bare-metal image (no custom bootloader; runs at 0x08000000)" OFF)
 
+# ---------------------------
+# Factory programming (PTR-2026-1-5 follow-up)
+# ---------------------------
+# OFF (default, every Release and Debug build): the FPGA/UFM programming
+#      service (OW_FPGA_PROG) and the Lattice programming entry points are
+#      compiled OUT of the image, and the laser-safety parameters are
+#      firmware-owned (safety_params.h): a host cannot set them.
+# ON  (CMake preset "Factory" / "Factory-BareMetal" only): programming and
+#      safety-parameter overrides are compiled in for manufacturing and RMA
+#      bench work. Never built for an rc/final tag (clinical-build.yml builds
+#      the Release preset only; build-firmware.yml checks the Release ELF for
+#      programming symbols). A Factory image announces itself at boot and in
+#      its version string ("-factory").
+option(OW_FACTORY_PROGRAMMING "Factory build: FPGA programming and safety-parameter overrides compiled in (bench only)" OFF)
+if(OW_FACTORY_PROGRAMMING AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(FATAL_ERROR "OW_FACTORY_PROGRAMMING must not be combined with a Release build type: use the Factory preset (Debug).")
+endif()
+
 # Generate version.h at configure time (initial)
 find_package(Git QUIET)
 
@@ -62,6 +80,10 @@ else()
     set(FW_GIT_SHA "unknown")
 endif()
 
+if(OW_FACTORY_PROGRAMMING)
+    set(FW_GIT_DESCRIBE "${FW_GIT_DESCRIBE}-factory")
+endif()
+
 string(TIMESTAMP FW_BUILD_TIME_UTC "%Y-%m-%d %H:%M:%S UTC" UTC)
 
 message(STATUS "FW version   : ${FW_GIT_DESCRIBE}")
@@ -73,6 +95,35 @@ configure_file(
     ${CMAKE_BINARY_DIR}/generated/version.h
     @ONLY
 )
+
+# ---------------------------
+# Expected FPGA configuration digests (fpga_attest.c)
+# ---------------------------
+# Generated from the released FPGA artefacts committed under fpga-artefacts/
+# at the tags recorded in scripts/sbom-manifest.json. The configure step
+# FAILS when a tag, an artefact or a digest does not match the manifest.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(NOT Python3_Interpreter_FOUND)
+    message(FATAL_ERROR "python3 is required to generate fpga_attest_expected.h (scripts/gen_fpga_digests.py)")
+endif()
+set(FPGA_ARTEFACT_DIR "${CMAKE_SOURCE_DIR}/fpga-artefacts" CACHE PATH "Released FPGA .jed artefacts, <repo>/<tag>/<file>")
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/scripts/gen_fpga_digests.py
+            --manifest ${CMAKE_SOURCE_DIR}/scripts/sbom-manifest.json
+            --artefacts ${FPGA_ARTEFACT_DIR}
+            -o ${CMAKE_BINARY_DIR}/generated/fpga_attest_expected.h
+    RESULT_VARIABLE FPGA_DIGEST_RESULT
+    OUTPUT_VARIABLE FPGA_DIGEST_OUTPUT
+    ERROR_VARIABLE FPGA_DIGEST_ERROR
+)
+message(STATUS "${FPGA_DIGEST_OUTPUT}")
+if(NOT FPGA_DIGEST_RESULT EQUAL 0)
+    message(FATAL_ERROR "FPGA digest generation failed:
+${FPGA_DIGEST_ERROR}")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${CMAKE_SOURCE_DIR}/scripts/sbom-manifest.json
+    ${CMAKE_SOURCE_DIR}/scripts/gen_fpga_digests.py)
 
 # Set the project name
 set(CMAKE_PROJECT_NAME motion-console-fw)
@@ -118,6 +169,10 @@ add_subdirectory(cmake/stm32cubemx)
 if(BARE_METAL)
     target_compile_definitions(stm32cubemx INTERFACE BARE_METAL_BUILD=1)
 endif()
+if(OW_FACTORY_PROGRAMMING)
+    target_compile_definitions(stm32cubemx INTERFACE OW_FACTORY_PROGRAMMING=1)
+    message(STATUS "Factory build : FPGA programming and safety overrides COMPILED IN (bench only)")
+endif()
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -153,6 +208,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/uart_comms.c
     Core/Src/flash_eeprom.c
     Core/Src/motion_config.c
+    Core/Src/motion_cfg_keys.c
+    Core/Src/safety_params.c
+    Core/Src/safety_ufm_record.c
+    Core/Src/sha256.c
+    Core/Src/fpga_attest.c
     Core/Src/fpga_register_map.c
     Core/Src/utils.c
     Core/Src/pdc_buffer.c

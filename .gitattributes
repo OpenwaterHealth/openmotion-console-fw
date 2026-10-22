@@ -1,0 +1,3 @@
+# Released FPGA artefacts are hashed byte for byte by scripts/gen_fpga_digests.py
+# against scripts/sbom-manifest.json. Never convert their line endings.
+fpga-artefacts/** -text
