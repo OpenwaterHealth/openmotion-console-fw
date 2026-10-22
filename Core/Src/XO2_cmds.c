@@ -3,6 +3,12 @@
 #include "XO2_cmds.h"
 #include "tca9548a.h"
 
+/* Openwater local change (Core/Src/LOCAL_CHANGES.md): the commands that
+ * erase or program the device (setUserCode, EraseFlash, setDone, CfgErase,
+ * CfgWritePage, UFMErase, UFMWritePage, FeatureRowErase, FeatureRowWrite,
+ * SRAMErase) are compiled only into FACTORY builds (OW_FACTORY_PROGRAMMING).
+ * Everything read-only stays in every build for fpga_attest.c. */
+
 
 volatile uint8_t txComplete = 0;
 volatile uint8_t rxComplete = 0;
@@ -169,6 +175,7 @@ int XO2ECAcmd_readUserCode(XO2Handle_t *pXO2, unsigned int *pVal)
 
 
 
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Set the 4 byte USERCODE in the XO2 Configuration logic block.
  * This function assembles the command sequence that allows programming the XO2 USERCODE
@@ -223,7 +230,7 @@ int XO2ECAcmd_setUserCode(XO2Handle_t *pXO2, unsigned int val)
 		return(ERROR);
 	}
 }
-
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECAcmd_setUserCode */
 
 /**
  * Read the 8 byte (64 bit) TraceID from the XO2 Feature Row.
@@ -431,6 +438,7 @@ int XO2ECAcmd_Refresh(XO2Handle_t *pXO2)
 }
 
 
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Issue the Done command that updates the Program DONE bit.
  * Typically used after programming the Cfg Flash and before 
@@ -489,10 +497,7 @@ int XO2ECAcmd_setDone(XO2Handle_t *pXO2)
 		return(ERROR);
 	}
 }
-
-
-
-
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECAcmd_setDone */
 
 /**
  * Read the 4 byte Status Register from the XO2 Configuration logic block.
@@ -804,6 +809,7 @@ int XO2ECAcmd_SetPage(XO2Handle_t *pXO2, XO2SectorMode_t mode, unsigned int page
 }
 
 
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Erase any/all entire sectors of the XO2 Flash memory.
  * Erase sectors based on the bitmap of parameter mode passed in.
@@ -882,6 +888,8 @@ int XO2ECAcmd_EraseFlash(XO2Handle_t *pXO2, unsigned char mode)
 //===========================================================================================================================
 //===========================================================================================================================
 //===========================================================================================================================
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECAcmd_EraseFlash */
+
 /**
  * Reset the Address Regsiter to point to the first Config Flash page (sector 0, page 0).
  * @param pXO2 pointer to the XO2 device to operate on
@@ -989,6 +997,7 @@ int XO2ECAcmd_CfgReadPage(XO2Handle_t *pXO2, unsigned char *pBuf)
 }
 
 
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Write a page (16 bytes) into the current UFM memory page.
  * Page address can be set using SetAddress command.
@@ -1052,7 +1061,9 @@ int XO2ECAcmd_CfgWritePage(XO2Handle_t *pXO2, const unsigned char *pBuf)
 		return(ERROR);
 	}
 }
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECAcmd_CfgWritePage */
 
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Erase the entire sector of the Configuration Flash memory.
  * This is a convience function to erase all Config contents to 0.  You can not erase on a page basis.
@@ -1083,6 +1094,8 @@ int XO2ECAcmd_CfgErase(XO2Handle_t *pXO2)
 //===========================================================================================================================
 //===========================================================================================================================
 //===========================================================================================================================
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECAcmd_CfgErase */
+
 /**
  * Reset the Address Regsiter to point to the first UFM page (sector 1, page 0).
  * @param pXO2 pointer to the XO2 device to operate on
@@ -1203,6 +1216,7 @@ int XO2ECAcmd_UFMReadPage(XO2Handle_t *pXO2, unsigned char *pBuf)
 	}
 }
 
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Write a page (16 bytes) into the current UFM memory page.
  * Page address can be set using SetAddress command.
@@ -1271,7 +1285,9 @@ int XO2ECAcmd_UFMWritePage(XO2Handle_t *pXO2, const unsigned char *pBuf)
 		return(ERROR);
 	}
 }
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECAcmd_UFMWritePage */
 
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Erase the entire sector of the UFM memory.
  * This is a convience function to erase all UFM contents to 0.  You can not erase on a page basis.
@@ -1305,8 +1321,9 @@ int XO2ECAcmd_UFMErase(XO2Handle_t *pXO2)
 //===========================================================================================================================
 //===========================================================================================================================
 //===========================================================================================================================
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECAcmd_UFMErase */
 
-
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Erase the Feature Row contents.
  * This is a convience function to erase just the feature row bits to 0.
@@ -1328,8 +1345,9 @@ int XO2ECAcmd_FeatureRowErase(XO2Handle_t *pXO2)
 
 	return(XO2ECAcmd_EraseFlash(pXO2, XO2ECA_CMD_ERASE_FTROW));
 }
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECAcmd_FeatureRowErase */
 
-
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Set the Feature Row.
  * This function assembles the command sequence that allows programming the XO2 FEATURE
@@ -1404,8 +1422,7 @@ int XO2ECAcmd_FeatureRowWrite(XO2Handle_t *pXO2, XO2FeatureRow_t *pFeature)
 		return(ERROR);
 	}
 }
-
-
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECAcmd_FeatureRowWrite */
 
 /**
  * Read the Feature Row contents.
@@ -1465,6 +1482,7 @@ int XO2ECAcmd_FeatureRowRead(XO2Handle_t *pXO2, XO2FeatureRow_t *pFeature)
 	return(OK);
 }
 
+#if defined(OW_FACTORY_PROGRAMMING)
 /**
  * Erase the SRAM, clearing the user design.
  * This is a convience function to erase just the SRAM.
@@ -1483,6 +1501,8 @@ int XO2ECAcmd_SRAMErase(XO2Handle_t *pXO2)
 
 
 // Callback implementations
+#endif /* OW_FACTORY_PROGRAMMING: XO2ECAcmd_SRAMErase */
+
 void MXO_I2C_MasterTxCpltCallback(I2C_HandleTypeDef *hi2c)
 {
     txComplete = 1;
