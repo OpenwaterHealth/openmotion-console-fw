@@ -225,6 +225,30 @@ Format:
   Method: Test  
   Pass: Error returned  
 
+- TC-FPGA-007
+  Maps to: SR-ATTEST-001
+  Description: OW_FPGA_PROG on a Release/Debug image
+  Method: HIL (tests/test_safety_state_hil.py)
+  Pass: OW_ERROR + OW_CODE_NOT_SUPPORTED for every opcode; Release ELF has no programming symbol (CI nm check)
+
+- TC-FPGA-008
+  Maps to: SR-ATTEST-002
+  Description: Boot attestation on a correctly programmed unit
+  Method: HIL
+  Pass: all four devices match, interlock 0x40 clears, readback time recorded
+
+- TC-FPGA-009
+  Maps to: SR-ATTEST-003
+  Description: Modified bitstream on one device (bench-only reprogramming)
+  Method: HIL (OPENMOTION_HIL_REPROGRAM=1)
+  Pass: digest mismatch reported, 0x40 set, trigger start refused with 0x40, boot-info shows state FAIL
+
+- TC-FPGA-010
+  Maps to: SR-ATTEST-002
+  Description: Digest pipeline and UFM record validation
+  Method: Test (host_tests: test_fpga_digest, test_safety_ufm_record, test_sha256)
+  Pass: NIST vectors, page-stream digest equals image digest, flipped bit / short read / swapped page detected; record good / bad checksum / out-of-range / blank / wrong device / layout / reserved
+
 ---
 
 ### Telemetry
@@ -402,6 +426,29 @@ Format:
   Description: Verify HW mapping  
   Method: HIL  
   Pass: Registers updated  
+- TC-CFG-009
+  Maps to: SR-SAFEP-002
+  Description: Config write with a safety key, unknown key, out-of-range value
+  Method: Test (host_tests/test_motion_cfg_keys.c) + HIL
+  Pass: refused with OW_CODE_CFG_SAFETY_KEY / CFG_UNKNOWN_KEY / CFG_RANGE; stored record and seq unchanged
+
+- TC-CFG-010
+  Maps to: SR-SAFEP-002
+  Description: Record migration v2 to v3
+  Method: Test (host_tests/test_motion_cfg_keys.c)
+  Pass: operational and opaque keys kept verbatim, safety and unknown keys dropped, out-of-range values dropped, never half-applied
+
+- TC-CFG-011
+  Maps to: SR-SAFEP-001
+  Description: TEC trip in force after record corruption
+  Method: HIL
+  Pass: after a refused write and an empty record the trip evaluates from the compile-time threshold; no defaults interlock for an empty record
+
+- TC-CFG-012
+  Maps to: SR-SAFEP-002
+  Description: Pass-through write to a firmware-owned register
+  Method: Test (host_tests) + HIL
+  Pass: refused "firmware-owned safety register"; operational register accepted only within range
 
 ---
 
