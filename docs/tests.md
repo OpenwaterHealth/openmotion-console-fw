@@ -225,6 +225,42 @@ Format:
   Method: Test  
   Pass: Error returned  
 
+- TC-FPGA-007
+  Maps to: SR-ATTEST-001
+  Description: OW_FPGA_PROG on a Release/Debug image
+  Method: HIL (tests/test_safety_state_hil.py)
+  Pass: OW_ERROR + OW_CODE_NOT_SUPPORTED for every opcode; Release ELF has no programming symbol (CI nm check)
+
+- TC-FPGA-008
+  Maps to: SR-ATTEST-002
+  Description: Boot attestation on a correctly programmed unit
+  Method: HIL
+  Pass: EE and OPT match with UFM valid, seed and TA reported not checked, interlock 0x40 clears, run complete within 10 s (FR-146), readback time recorded
+
+- TC-FPGA-009
+  Maps to: SR-ATTEST-003
+  Description: Modified bitstream on one device (bench-only reprogramming)
+  Method: HIL (OPENMOTION_HIL_REPROGRAM=1)
+  Pass: digest mismatch reported, 0x40 set, trigger start refused with 0x40, boot-info shows state FAIL
+
+- TC-FPGA-010
+  Maps to: SR-ATTEST-002
+  Description: Digest pipeline and UFM record validation
+  Method: Test (host_tests: test_fpga_digest, test_safety_ufm_record, test_sha256)
+  Pass: NIST vectors, page-stream digest equals image digest, flipped bit / short read / swapped page detected; record good / FPGA reference record byte-identical / bad checksum / outside envelope (each field, LL > UL) / blank / old layout / layout / reserved; loads only from a valid record; setpoint ceilings; envelope LSBs equal the register map
+
+- TC-FPGA-011
+  Maps to: SR-ATTEST-002, SR-SAFEP-001
+  Description: Unit without a valid safety record (blank UFM) on a Release image
+  Method: HIL (test_missing_or_invalid_record_keeps_interlock)
+  Pass: digests match, device status 0x08 (blank) or 0x04 (invalid), run FAIL, interlock 0x40 set, boot-info state FAIL, trigger start refused with 0x40
+
+- TC-SAFEP-010
+  Maps to: SR-SAFEP-001, SR-SAFEP-002
+  Description: Per-unit ceilings on the operating point
+  Method: Test (host_tests: test_motion_cfg_keys)
+  Pass: a ceiling below the envelope refuses a larger TA_CURRENT_DRV / TA_PULSE_WIDTH on the config and pass-through paths; a ceiling above the envelope leaves the envelope; safety keys take no ceiling; Factory TEC_TRIP override above 40 C refused
+
 ---
 
 ### Telemetry
@@ -402,6 +438,29 @@ Format:
   Description: Verify HW mapping  
   Method: HIL  
   Pass: Registers updated  
+- TC-CFG-009
+  Maps to: SR-SAFEP-002
+  Description: Config write with a safety key, unknown key, out-of-range value
+  Method: Test (host_tests/test_motion_cfg_keys.c) + HIL
+  Pass: refused with OW_CODE_CFG_SAFETY_KEY / CFG_UNKNOWN_KEY / CFG_RANGE; stored record and seq unchanged
+
+- TC-CFG-010
+  Maps to: SR-SAFEP-002
+  Description: Record migration v2 to v3
+  Method: Test (host_tests/test_motion_cfg_keys.c)
+  Pass: operational and opaque keys kept verbatim, safety and unknown keys dropped, out-of-range values dropped, never half-applied
+
+- TC-CFG-011
+  Maps to: SR-SAFEP-001
+  Description: TEC trip in force after record corruption
+  Method: HIL
+  Pass: after a refused write and an empty record the trip evaluates from the compile-time threshold; no defaults interlock for an empty record
+
+- TC-CFG-012
+  Maps to: SR-SAFEP-002
+  Description: Pass-through write to a firmware-owned register
+  Method: Test (host_tests) + HIL
+  Pass: refused "firmware-owned safety register"; operational register accepted only within range
 
 ---
 

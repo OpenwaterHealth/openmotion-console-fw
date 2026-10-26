@@ -3,7 +3,9 @@
 #include "common.h" // COMMAND_MAX_SIZE for internal wire buffer
 #include "jsmn.h"
 #include "json_strict.h"
+#include "motion_cfg_keys.h"
 #include "msg_queue.h"
+#include "safety_ufm_record.h" // safety_crc16_ccitt
 
 #include <string.h>
 #include <stdbool.h>
@@ -15,22 +17,20 @@ static bool       g_cfg_defaulted = false; // running on defaults, see motion_cf
 
 static uint8_t g_cfg_wire_buf[COMMAND_MAX_SIZE];
 
+/* Token pool for the strict parse and the key policy. Static: too large for
+ * the command-handler stack. Single-threaded use only (main loop). */
+static jsmntok_t g_cfg_tokens[MOTION_CFG_MAX_JSON_TOKENS];
+/* Scratch for the v2 -> v3 migration. */
+static char g_cfg_scratch[MOTION_CFG_JSON_MAX];
+
+static char g_cfg_last_refusal[72];
+
 // ------------------- CRC16-CCITT -------------------
-// CRC-16/CCITT-FALSE: poly=0x1021, init=0xFFFF, no final XOR. crc is the
-// running value (0xFFFF to start), so several ranges can be chained.
+// CRC-16/CCITT-FALSE: poly=0x1021, init=0xFFFF, no final XOR (shared with the
+// safety UFM record). The running value lets several ranges be chained.
 static uint16_t crc16_ccitt_update(uint16_t crc, const uint8_t *data, size_t len)
 {
-    for (size_t i = 0; i < len; i++) {
-        crc ^= ((uint16_t)data[i] << 8);
-        for (int b = 0; b < 8; b++) {
-            if (crc & 0x8000u) {
-                crc = (uint16_t)((crc << 1) ^ 0x1021u);
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
-    return crc;
+    return safety_crc16_ccitt(crc, data, len);
 }
 
 // v1 record CRC: magic, version and seq only (the bytes before the crc field).
@@ -41,11 +41,9 @@ static uint16_t motion_cfg_calc_crc_v1(const motion_cfg_t *cfg)
                               offsetof(motion_cfg_t, crc));
 }
 
-// v2 record CRC (CFW-02): every byte of the record except the crc field
+// v2+ record CRC (CFW-02): every byte of the record except the crc field
 // itself -- magic, version, seq, the two reserved bytes and the whole JSON
 // area, which motion_cfg_normalize_json() NUL-pads so the value is stable.
-// A change anywhere in the JSON, including the safety limits and TEC_TRIP,
-// fails the check.
 static uint16_t motion_cfg_calc_crc(const motion_cfg_t *cfg)
 {
     const uint8_t *p = (const uint8_t *)cfg;
@@ -81,7 +79,9 @@ static void motion_cfg_normalize_json(motion_cfg_t *cfg)
     }
 }
 
-// Build a clean default config in RAM
+// Build a clean default config in RAM. v3 defaults carry no operational
+// values: the laser operating point is per unit and comes from the host; the
+// safety parameters are compiled in and need nothing here.
 static void motion_cfg_make_defaults(motion_cfg_t *dst)
 {
     memset(dst, 0, sizeof(motion_cfg_t));
@@ -89,33 +89,22 @@ static void motion_cfg_make_defaults(motion_cfg_t *dst)
     dst->magic      = MOTION_MAGIC;
     dst->version    = MOTION_VER;
     dst->seq        = 0;
-
-    /* Initialize JSON with sensible defaults so an empty config contains useful values. */
-    {
-        const char *default_json = "{\"TEC_TRIP\": 40, \"OPT_THRESH\": 7143, \"EE_THRESH\": 5000, \"EE_GAIN\": 1.86, \"OPT_GAIN\": 1.86}";
-        /* Ensure we never overflow the JSON buffer. */
-        snprintf(dst->json, MOTION_CFG_JSON_MAX, "%s", default_json);
-    }
+    snprintf(dst->json, MOTION_CFG_JSON_MAX, "%s", "{}");
 
     motion_cfg_normalize_json(dst);
     dst->crc        = motion_cfg_calc_crc(dst);
 }
 
-// Validate a v2 record: magic, version, whole-record CRC, terminated JSON.
-static bool motion_cfg_is_valid(const motion_cfg_t *cfg)
+// Structural validity of a record with a whole-record CRC (v2 or v3): magic,
+// the given version, CRC, terminated JSON.
+static bool motion_cfg_record_ok(const motion_cfg_t *cfg, uint32_t version)
 {
     if (cfg->magic   != MOTION_MAGIC) { return false; }
-    if (cfg->version != MOTION_VER)   { return false; }
-
-    // json must contain a '\0' somewhere in range
+    if (cfg->version != version)      { return false; }
     if (memchr(cfg->json, '\0', MOTION_CFG_JSON_MAX) == NULL) {
         return false;
     }
-
-    uint16_t calc = motion_cfg_calc_crc(cfg);
-    if (calc != cfg->crc)           { return false; }
-
-    return true;
+    return motion_cfg_calc_crc(cfg) == cfg->crc;
 }
 
 // A v1 record written by older firmware: its CRC covers only magic, version
@@ -179,6 +168,42 @@ static void motion_cfg_load_raw(void)
                (uint32_t)(sizeof(motion_cfg_t) / sizeof(uint32_t)));
 }
 
+/* Tokenize g_cfg_scratch-free: parse json[0..len) into the static pool.
+ * Returns the token count, or <0 when it is not a strict JSON object. */
+static int motion_cfg_tokenize(const char *json, size_t len)
+{
+    if (!json_object_is_strict(json, len, g_cfg_tokens, MOTION_CFG_MAX_JSON_TOKENS)) {
+        return -1;
+    }
+    jsmn_parser parser;
+    jsmn_init(&parser, NULL);
+    return jsmn_parse(&parser, json, len, g_cfg_tokens, MOTION_CFG_MAX_JSON_TOKENS, NULL);
+}
+
+/* Migrate the JSON of a v1/v2 record to the v3 key policy: keep the
+ * operational and opaque keys, drop (and log) the safety and unknown keys.
+ * In a Factory build the safety keys are kept as bench overrides. Returns
+ * false when the old JSON cannot be parsed or the result does not fit. */
+static bool motion_cfg_migrate_json(void)
+{
+    size_t len = strnlen(g_cfg.json, MOTION_CFG_JSON_MAX);
+    int r = motion_cfg_tokenize(g_cfg.json, len);
+    if (r < 1) {
+        return false;
+    }
+    int dropped = motion_cfg_filter_json(g_cfg.json, g_cfg_tokens, r,
+                                         motion_cfg_safety_keys_writable(),
+                                         g_cfg_scratch, sizeof(g_cfg_scratch));
+    if (dropped < 0) {
+        return false;
+    }
+    printf("motion config: migrating record v%lu to v3 (%d key(s) dropped: safety parameters are firmware-owned)\r\n",
+           (unsigned long)(g_cfg.version >> 16), dropped);
+    memcpy(g_cfg.json, g_cfg_scratch, strlen(g_cfg_scratch) + 1U);
+    g_cfg.version = MOTION_VER;
+    return true;
+}
+
 // Ensure g_cfg is initialized and valid
 static void motion_cfg_ensure_loaded(void)
 {
@@ -188,23 +213,33 @@ static void motion_cfg_ensure_loaded(void)
 
     motion_cfg_load_raw();
 
-    if (motion_cfg_is_valid(&g_cfg)) {
-        // v2 record, intact.
-    } else if (motion_cfg_is_valid_v1(&g_cfg)) {
-        // v1 record from older firmware: keep its JSON and rewrite it as v2,
-        // so it is protected from here on. The JSON is re-checked by the
-        // strict parse in motion_cfg_apply_settings() as before.
-        printf("motion config: migrating v1 record to v2\r\n");
-        g_cfg.version = MOTION_VER;
-        (void)motion_cfg_writeback();
+    bool ok;
+    if (motion_cfg_record_ok(&g_cfg, MOTION_VER)) {
+        // v3 record, intact. Its keys are re-checked by the apply.
+        ok = true;
+    } else if (motion_cfg_record_ok(&g_cfg, MOTION_VER_V2) || motion_cfg_is_valid_v1(&g_cfg)) {
+        // Older record: migrate its JSON to the v3 policy and rewrite it.
+        // A record that cannot be migrated is invalid as a whole.
+        ok = motion_cfg_migrate_json();
+        if (ok) {
+            ok = (motion_cfg_writeback() == HAL_OK);
+        }
+        if (!ok) {
+            motion_cfg_report("motion config migration failed; defaults in use, trigger refused");
+        }
     } else {
-        // CFW-03: no valid record (first boot, erased sector or corruption).
-        // Run on the built-in defaults in RAM only: the stored record is left
-        // as it is for inspection or recovery, the host is told, and
-        // Trigger_Start() refuses until the host writes a valid config.
+        ok = false;
+        motion_cfg_report("motion config invalid or missing; defaults in use, trigger refused");
+    }
+
+    if (!ok) {
+        // CFW-03: no valid record (first boot, erased sector, corruption or
+        // an unmigratable record). Run on the built-in defaults in RAM only:
+        // the stored record is left as it is for inspection or recovery,
+        // the host is told, and Trigger_Start() refuses until the host
+        // writes a valid config.
         motion_cfg_make_defaults(&g_cfg);
         g_cfg_defaulted = true;
-        motion_cfg_report("motion config invalid or missing; defaults in use, trigger refused");
     }
 
     g_cfg_loaded = true;
@@ -230,48 +265,90 @@ const char *motion_cfg_get_json_ptr(void)
     return g_cfg.json;
 }
 
-/* True when json[0..len) is a strict JSON object within MOTION_CFG_MAX_JSON_TOKENS
- * (the parse motion_cfg_apply_settings() runs at boot, plus the value check in
- * json_strict.c). Static token pool: too large for the command-handler stack. */
-static bool motion_cfg_json_parses(const char *json, size_t len)
+const char *motion_cfg_result_name(motion_cfg_result_t r)
 {
-    static jsmntok_t tokens[MOTION_CFG_MAX_JSON_TOKENS];
-
-    return json_object_is_strict(json, len, tokens, MOTION_CFG_MAX_JSON_TOKENS);
+    switch (r) {
+    case MOTION_CFG_OK:              return "ok";
+    case MOTION_CFG_ERR_PARAM:       return "empty payload";
+    case MOTION_CFG_ERR_TOO_LONG:    return "too long";
+    case MOTION_CFG_ERR_NOT_STRICT:  return "not a strict JSON object";
+    case MOTION_CFG_ERR_SAFETY_KEY:  return "safety parameter is firmware-owned";
+    case MOTION_CFG_ERR_UNKNOWN_KEY: return "unknown key";
+    case MOTION_CFG_ERR_RANGE:       return "value out of range";
+    case MOTION_CFG_ERR_FLASH:       return "flash write failed";
+    default:                         return "unknown";
+    }
 }
 
-HAL_StatusTypeDef motion_cfg_set_json(const char *json, size_t len)
+const char *motion_cfg_last_refusal(void)
+{
+    return g_cfg_last_refusal;
+}
+
+/* Why a host JSON cannot be stored, or MOTION_CFG_OK. Fills
+ * g_cfg_last_refusal and reports to the host. */
+static motion_cfg_result_t motion_cfg_check_json(const char *json, size_t len)
+{
+    g_cfg_last_refusal[0] = '\0';
+
+    /* Refuse, rather than store, a config the boot-time apply could not parse:
+     * one too long for the page (it used to be truncated to fit) or one that is
+     * not a strict-JSON object (CFW-12, CFW-15). */
+    if (len == 0U || len >= MOTION_CFG_JSON_MAX) {
+        (void)snprintf(g_cfg_last_refusal, sizeof g_cfg_last_refusal,
+                       "%u bytes (max %u)", (unsigned)len, (unsigned)(MOTION_CFG_JSON_MAX - 1U));
+        return MOTION_CFG_ERR_TOO_LONG;
+    }
+    int r = motion_cfg_tokenize(json, len);
+    if (r < 1) {
+        return MOTION_CFG_ERR_NOT_STRICT;
+    }
+
+    /* Every key must be allowed and every value in range. A safety key is
+     * refused outright (not dropped): the host must not believe it set it. */
+    cfg_check_t c = motion_cfg_check_tokens(json, g_cfg_tokens, r, motion_cfg_safety_keys_writable(),
+                                            g_cfg_last_refusal, sizeof g_cfg_last_refusal);
+    switch (c) {
+    case CFG_CHECK_OK:          return MOTION_CFG_OK;
+    case CFG_CHECK_SAFETY_KEY:  return MOTION_CFG_ERR_SAFETY_KEY;
+    case CFG_CHECK_UNKNOWN_KEY: return MOTION_CFG_ERR_UNKNOWN_KEY;
+    case CFG_CHECK_BAD_VALUE:   return MOTION_CFG_ERR_RANGE;
+    default:                    return MOTION_CFG_ERR_NOT_STRICT;
+    }
+}
+
+motion_cfg_result_t motion_cfg_set_json(const char *json, size_t len)
 {
     if (json == NULL) {
-        return HAL_ERROR;
+        return MOTION_CFG_ERR_PARAM;
     }
 
     motion_cfg_ensure_loaded();
 
-    /* Refuse, rather than store, a config the boot-time apply could not parse:
-     * one too long for the page (it used to be truncated to fit) or one that is
-     * not a strict-JSON object. Storing it would leave the next boot without
-     * the TEC trip and the safety limits (CFW-12, CFW-15). The stored config is
-     * kept unchanged. */
-    if (len == 0U || len >= MOTION_CFG_JSON_MAX) {
-        printf("ERROR: motion config JSON is %u bytes (max %u); not stored\r\n",
-               (unsigned)len, (unsigned)(MOTION_CFG_JSON_MAX - 1U));
-        return HAL_ERROR;
-    }
-    if (!motion_cfg_json_parses(json, len)) {
-        printf("ERROR: motion config is not a strict JSON object; not stored\r\n");
-        return HAL_ERROR;
+    motion_cfg_result_t res = motion_cfg_check_json(json, len);
+    if (res != MOTION_CFG_OK) {
+        char m[MQ_MAX_MSG_SIZE];
+        int n = snprintf(m, sizeof m,
+                         "{\"type\":\"system\",\"state\":\"error\",\"msg\":\"config write refused: %s\",\"key\":\"%.40s\"}",
+                         motion_cfg_result_name(res), g_cfg_last_refusal);
+        if (n > 0 && (size_t)n < sizeof m) {
+            (void)mq_push(m, (size_t)n);
+        }
+        printf("ERROR: motion config write refused: %s (%s); not stored\r\n",
+               motion_cfg_result_name(res), g_cfg_last_refusal);
+        return res;
     }
 
     memcpy(g_cfg.json, json, len);
     g_cfg.json[len] = '\0';
+    g_cfg.version = MOTION_VER;
 
     // Persist. A verified write ends the defaulted state (CFW-03).
-    HAL_StatusTypeDef st = motion_cfg_writeback();
-    if (st == HAL_OK) {
-        g_cfg_defaulted = false;
+    if (motion_cfg_writeback() != HAL_OK) {
+        return MOTION_CFG_ERR_FLASH;
     }
-    return st;
+    g_cfg_defaulted = false;
+    return MOTION_CFG_OK;
 }
 
 HAL_StatusTypeDef motion_cfg_wire_read(const uint8_t **out_buf,
@@ -319,10 +396,19 @@ HAL_StatusTypeDef motion_cfg_wire_read(const uint8_t **out_buf,
     return HAL_OK;
 }
 
-HAL_StatusTypeDef motion_cfg_wire_write(const uint8_t *buf, uint16_t len)
+/* Length of the JSON text without a trailing NUL the host may have included. */
+static size_t motion_cfg_text_len(const uint8_t *p, size_t len)
+{
+    while (len > 0U && p[len - 1U] == '\0') {
+        len--;
+    }
+    return len;
+}
+
+motion_cfg_result_t motion_cfg_wire_write(const uint8_t *buf, uint16_t len)
 {
     if (buf == NULL || len == 0U) {
-        return HAL_ERROR;
+        return MOTION_CFG_ERR_PARAM;
     }
 
     // Try to parse full wire format first.
@@ -337,13 +423,14 @@ HAL_StatusTypeDef motion_cfg_wire_write(const uint8_t *buf, uint16_t len)
             uint32_t total = (uint32_t)sizeof(motion_cfg_wire_hdr_t) + (uint32_t)hdr.json_len;
             if (total <= (uint32_t)len) {
                 const uint8_t *json_ptr = &buf[sizeof(motion_cfg_wire_hdr_t)];
-                return motion_cfg_set_json((const char *)json_ptr, (size_t)hdr.json_len);
+                return motion_cfg_set_json((const char *)json_ptr,
+                                           motion_cfg_text_len(json_ptr, (size_t)hdr.json_len));
             }
         }
     }
 
     // Fallback: treat payload as raw JSON bytes.
-    return motion_cfg_set_json((const char *)buf, (size_t)len);
+    return motion_cfg_set_json((const char *)buf, motion_cfg_text_len(buf, (size_t)len));
 }
 
 HAL_StatusTypeDef motion_cfg_snapshot(motion_cfg_t *out)
@@ -359,21 +446,15 @@ HAL_StatusTypeDef motion_cfg_snapshot(motion_cfg_t *out)
 
 HAL_StatusTypeDef motion_cfg_save(const motion_cfg_t *new_cfg)
 {
+    if (new_cfg == NULL) {
+        return HAL_ERROR;
+    }
     motion_cfg_ensure_loaded();
 
-    // Copy caller-updated fields into our working config.
-    // We *trust* their chosen values for hv_settng/hv_enabled/auto_on/json.
-    // We IGNORE their seq/crc/magic/version and regenerate those.
-
-    g_cfg.magic      = MOTION_MAGIC;
-    g_cfg.version    = MOTION_VER;
-
-    // Copy JSON safely. Caller might not have padded or '\0' at the end.
-    memcpy(g_cfg.json, new_cfg->json, MOTION_CFG_JSON_MAX);
-    g_cfg.json[MOTION_CFG_JSON_MAX - 1U] = '\0';
-
-    // Now write full page with updated data
-    return motion_cfg_writeback();
+    // The caller's JSON goes through the same policy as a host write; its
+    // seq/crc/magic/version are regenerated.
+    size_t len = strnlen(new_cfg->json, MOTION_CFG_JSON_MAX);
+    return (motion_cfg_set_json(new_cfg->json, len) == MOTION_CFG_OK) ? HAL_OK : HAL_ERROR;
 }
 
 HAL_StatusTypeDef motion_cfg_commit(void)

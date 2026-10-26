@@ -23,6 +23,10 @@ permissions:
 # tag. For bench work against a Debug bootloader built from local test keys,
 # sign the slot image locally with the bootloader repo's py-tools/sign_firmware.py.
 #
+# The "Factory" preset (FPGA/UFM programming and safety-parameter overrides
+# compiled in) is never built here or by clinical-build.yml: it is a local
+# bench build only (docs/fpga-attestation.md).
+#
 # Setup and operations: OpenwaterHealth/OpenWater-KMS, docs/RUNBOOK-kms-signing-setup.md.
 # ---------------------------------------------------------------------------
 
@@ -74,6 +78,19 @@ jobs:
             -w /workspace \
             ghcr.io/openwaterhealth/stm32-build-env:latest \
             bash -lc "git config --global --add safe.directory /workspace && cmake --preset ${{ steps.cfg.outputs.config }} && cmake --build build/${{ steps.cfg.outputs.config }} --config ${{ steps.cfg.outputs.config }} --target all -j 10"
+
+      # The FPGA/UFM programming paths exist only in Factory builds, which no
+      # tag ever builds. Prove the image carries none of them (PTR-2026-1-5
+      # follow-up): the check must be empty for every Release and Debug ELF.
+      - name: Check the image contains no FPGA programming code
+        run: |
+          docker run --rm             -v "$GITHUB_WORKSPACE":/workspace             -w /workspace             ghcr.io/openwaterhealth/stm32-build-env:latest             bash -lc "scripts/check_release_symbols.sh build/${{ steps.cfg.outputs.config }}/motion-console-fw.elf"
+
+      # Pure-C unit tests of the configuration policy, the safety record, the
+      # digest pipeline and SHA-256 (host_tests/README.md).
+      - name: Host tests
+        run: |
+          docker run --rm             -v "$GITHUB_WORKSPACE":/workspace             -w /workspace/host_tests             ghcr.io/openwaterhealth/stm32-build-env:latest             bash -lc "make clean && make run"
 
       # Bare-metal image: standalone at 0x08000000, no bootloader (BARE_METAL=ON).
       - name: Build bare-metal image (@0x08000000)

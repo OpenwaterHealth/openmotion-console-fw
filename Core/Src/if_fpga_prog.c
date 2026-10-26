@@ -17,6 +17,13 @@
 #include <string.h>
 #include <stdint.h>
 
+/* The FPGA programming service exists in FACTORY builds only (CMake preset
+ * "Factory", OW_FACTORY_PROGRAMMING). In every other build this file
+ * contributes no code: if_commands.c answers OW_FPGA_PROG with
+ * OW_CODE_NOT_SUPPORTED, and CI checks the Release ELF carries none of the
+ * programming symbols (PTR-2026-1-5 follow-up, CFW-09). */
+#if defined(OW_FACTORY_PROGRAMMING)
+
 /* Pointer to the XO2 device handle initialised by if_cmd_set_xo2_prog_handle() */
 static XO2Handle_t *xo2_prog_devp = NULL;
 
@@ -185,9 +192,23 @@ _Bool process_fpga_prog_command(UartPacket *response, UartPacket *cmd)
             return OW_CODE_DATA_ERROR;
         }
 
-        XO2FeatureRow_t fr;        
+        XO2FeatureRow_t fr;
         memcpy(fr.feature, &cmd->data[0], sizeof(fr.feature));
         memcpy(fr.feabits, &cmd->data[8], sizeof(fr.feabits));
+        /* A feature row that disables the I2C configuration port makes the
+         * device unreachable over this path for good (JTAG only). Seen on
+         * the bench 2026-10-22: openmotion-seed-fpga 1.0.3 (before its
+         * "enable i2c updates" release) carries FEABITS 0000010001100000
+         * where 0.1.1 carries 0000010001000000; the SDK's byte packing puts
+         * that bit at data[8] & 0x04, and the port went silent on write.
+         * Refuse it rather than brick a device (docs/fpga-attestation.md). */
+        if ((fr.feabits[0] & 0x04u) != 0u)
+        {
+            printf("FEATROW_WRITE refused: FEABITS would disable the I2C configuration port\r\n");
+            response->data_len = 0;
+            response->packet_type = OW_ERROR;
+            return OW_CODE_DATA_ERROR;
+        }
         int ret = XO2ECAcmd_FeatureRowWrite(xo2_prog_devp, &fr);
         response->data_len = 0;
         if (ret != OK)
@@ -391,3 +412,12 @@ void if_cmd_set_xo2_prog_handle(XO2Handle_t *h)
 {
     xo2_prog_devp = h;
 }
+
+#else /* !OW_FACTORY_PROGRAMMING */
+
+void if_cmd_set_xo2_prog_handle(XO2Handle_t *h)
+{
+    (void)h; /* no programming service in this build */
+}
+
+#endif /* OW_FACTORY_PROGRAMMING */

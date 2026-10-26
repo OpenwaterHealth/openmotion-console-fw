@@ -125,8 +125,18 @@ typedef enum {
 	OW_CTRL_GET_EEPROM_EUI = 0x2A,
 } MotionControllerCommands;
 
+/* Result codes. The low values are returned by the FPGA programming
+ * dispatcher; the 0xF* values also travel on the wire as the single data
+ * byte of an OW_ERROR reply where a command needs to say WHY it refused
+ * (OW_FPGA_PROG in a Release build, OW_CMD_USR_CFG write). Mirrored by the
+ * SDK (omotion/config.py). */
 typedef enum {
 	OW_CODE_SUCCESS = 0x00,
+	OW_CODE_CFG_RANGE = 0xF8,        /* config write: value not a finite number or out of range */
+	OW_CODE_CFG_UNKNOWN_KEY = 0xF9,  /* config write: key not in the allow-list */
+	OW_CODE_CFG_SAFETY_KEY = 0xFA,   /* config write: names a firmware-owned safety parameter */
+	OW_CODE_NOT_SUPPORTED = 0xFB,    /* command compiled out of this build (OW_FPGA_PROG in Release/Debug) */
+	OW_CODE_BUSY = 0xFC,             /* refused for now: attestation running, or trigger running */
 	OW_CODE_IDENT_ERROR = 0xFD,
 	OW_CODE_DATA_ERROR = 0xFE,
 	OW_CODE_ERROR = 0xFF,
@@ -152,8 +162,15 @@ typedef enum {
 	OW_CMD_DFU = 0x0D,
 	OW_CMD_NOP = 0x0E,
 	OW_CMD_RESET = 0x0F,
+	/* 0x10 is OW_CMD_RESET_HISTORY on the sensor; not used here. */
+	OW_CMD_FPGA_ATTEST = 0x11, /* read-only. reserved 0: report (fpga_attest_report_t); reserved 1: start a run, then report. OW_ERROR + OW_CODE_BUSY while a run or the trigger runs. */
 } OWGlobalCommands;
 
+/* OW_FPGA_PROG class. Available in FACTORY builds only (CMake preset
+ * "Factory", OW_FACTORY_PROGRAMMING): a Release or Debug image answers every
+ * opcode of this class with OW_ERROR and one data byte OW_CODE_NOT_SUPPORTED,
+ * and contains no programming code (checked by nm in CI). The safety FPGAs'
+ * configuration is attested instead (OW_CMD_FPGA_ATTEST). */
 typedef enum {
 	OW_CMD_FPGA_PROG_OPEN          = 0x30, /* Open cfg interface in offline mode */
 	OW_CMD_FPGA_PROG_ERASE         = 0x31, /* Erase flash sectors (1-byte mode bitmap) */

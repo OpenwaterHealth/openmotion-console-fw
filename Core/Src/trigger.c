@@ -11,6 +11,7 @@
 #include "odometer.h"
 #include "led_driver.h"
 #include "motion_config.h"
+#include "fpga_attest.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -285,6 +286,12 @@ HAL_StatusTypeDef Trigger_SetConfig(const Trigger_Config_t *config) {
     if (trigger_validate(config, &arr_ticks) != HAL_OK) {
         return HAL_ERROR;
     }
+    /* A failed FPGA attestation refuses a new configuration as well as a
+     * start (fpga_attest.h); a check still pending does not. */
+    if (fpga_attest_failed()) {
+        printf("Trigger_SetConfig refused: FPGA attestation failed\r\n");
+        return HAL_ERROR;
+    }
 
     /* A running trigger is stopped before the timers are reprogrammed. Use the
      * timer's own state: trigger_config.TriggerStatus is a host-supplied field. */
@@ -382,6 +389,7 @@ uint8_t Trigger_GetInterlocks(void)
     if (motion_cfg_limits_fault()) { m |= TRIG_INTERLOCK_LIMITS; }
     if (_safety_trigger_interlock) { m |= TRIG_INTERLOCK_TEC; }
     if (motion_cfg_is_defaulted()) { m |= TRIG_INTERLOCK_CONFIG; }
+    if (fpga_attest_interlocked()) { m |= TRIG_INTERLOCK_FPGA_ATTEST; }
     return m;
 }
 
@@ -404,9 +412,12 @@ HAL_StatusTypeDef Trigger_Start() {
      * valid stored record was found (CFW-03): its per-unit safety limits
      * and TEC trip are not in effect. An unreadable safety FPGA status is
      * treated as a fault too (CFW-04), and so is a safety limit from the
-     * config that was not loaded and verified (CFW-10). */
+     * config that was not loaded and verified (CFW-10), and an FPGA
+     * configuration that has not yet been attested against the released
+     * bitstreams, or failed that check (fpga_attest.h). */
     if(_usb_trigger_interlock || _laser_safety_interlock || _laser_safety_unknown ||
-       _safety_trigger_interlock || motion_cfg_is_defaulted() || motion_cfg_limits_fault()){
+       _safety_trigger_interlock || motion_cfg_is_defaulted() || motion_cfg_limits_fault() ||
+       fpga_attest_interlocked()){
         return HAL_ERROR;
     }
 

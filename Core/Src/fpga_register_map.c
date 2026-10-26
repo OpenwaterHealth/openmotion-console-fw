@@ -1,4 +1,6 @@
 #include "fpga_register_map.h"
+#include "motion_cfg_keys.h"
+#include "safety_envelope.h"
 #include <string.h>
 
 /* Flat register map keyed by friendlyName.
@@ -65,6 +67,7 @@ static const FpgaRegisterEntry fpga_register_table[] = {
     { "EE_MINOR",          { 1, 6, 1, 0x41, 0x26, FPGA_DIR_RD, 1.0f    } },
     { "EE_MAJOR",          { 1, 6, 1, 0x41, 0x27, FPGA_DIR_RD, 1.0f    } },
     { "EE_ID",             { 1, 6, 1, 0x41, 0x28, FPGA_DIR_RD, 1.0f    } },
+    { "EE_UFM_STATUS",     { 1, 6, 1, 0x41, 0x31, FPGA_DIR_RD, 1.0f    } },  /* UFM loader bitstreams only (safety_ufm_record.h) */
 
     /* ── Safety OPT ──────────────────────────────────────────────────────── */
     { "OPT_PULSE_WIDTH_LL", { 1, 7, 4, 0x41, 0x00, FPGA_DIR_RW, 0.320f  } },
@@ -86,6 +89,7 @@ static const FpgaRegisterEntry fpga_register_table[] = {
     { "OPT_MINOR",          { 1, 7, 1, 0x41, 0x26, FPGA_DIR_RD, 1.0f    } },
     { "OPT_MAJOR",          { 1, 7, 1, 0x41, 0x27, FPGA_DIR_RD, 1.0f    } },
     { "OPT_ID",             { 1, 7, 1, 0x41, 0x28, FPGA_DIR_RD, 1.0f    } },
+    { "OPT_UFM_STATUS",     { 1, 7, 1, 0x41, 0x31, FPGA_DIR_RD, 1.0f    } },  /* UFM loader bitstreams only */
 };
 
 #define FPGA_REGISTER_TABLE_SIZE \
@@ -118,8 +122,40 @@ static const FpgaRegisterEntry *fpga_register_at(int mux, int channel,
     return NULL;
 }
 
+/* Little-endian value of a pass-through payload, in engineering units. */
+static double passthrough_value(const FpgaRegister *r, const uint8_t *data, uint8_t len)
+{
+    uint32_t raw = 0U;
+    for (uint8_t b = 0; b < len && b < 4U; b++) {
+        raw |= ((uint32_t)data[b]) << (8U * b);
+    }
+    double scale = (r->scale != 0.0f) ? (double)r->scale : 1.0;
+    return (double)raw * scale;
+}
+
+/* Ownership and range (PTR-2026-1-5 follow-up): a register the firmware owns
+   (the limits of safety_envelope.h, the driver clamps, the static control
+   words: the CFG_KEY_SAFETY and unlisted keys) is refused unless the build is
+   a Factory build; an operational register is accepted only within its
+   allow-list range. NULL when allowed. */
+static const char *passthrough_ownership_problem(const FpgaRegisterEntry *e,
+                                                 const uint8_t *data, uint8_t len)
+{
+    const cfg_key_rule_t *rule = motion_cfg_key_rule(e->name);
+    bool owned = (rule == NULL || rule->cls == CFG_KEY_SAFETY);
+
+    if (owned && !motion_cfg_safety_keys_writable()) {
+        return "firmware-owned safety register";
+    }
+    if (rule == NULL || data == NULL) {
+        return NULL; /* Factory build: unlisted writable register, bench use */
+    }
+    double v = passthrough_value(&e->reg, data, len);
+    return (v < rule->min || v > motion_cfg_effective_max(rule)) ? "value out of range" : NULL;
+}
+
 const char *fpga_passthrough_write_problem(int mux, int channel, uint8_t i2c_addr,
-                                           uint8_t offset, uint8_t len,
+                                           uint8_t offset, uint8_t len, const uint8_t *data,
                                            bool trigger_running)
 {
     if (!fpga_channel_is_mapped(mux, channel)) {
@@ -141,7 +177,10 @@ const char *fpga_passthrough_write_problem(int mux, int channel, uint8_t i2c_add
         }
         return (len >= 1U && len <= e->reg.data_len) ? NULL : "length does not match the register";
     }
-    return (len == e->reg.data_len) ? NULL : "length does not match the register";
+    if (len != e->reg.data_len) {
+        return "length does not match the register";
+    }
+    return passthrough_ownership_problem(e, data, len);
 }
 
 const FpgaRegister *fpga_register_lookup(const char *name)
@@ -150,6 +189,16 @@ const FpgaRegister *fpga_register_lookup(const char *name)
     for (size_t i = 0; i < FPGA_REGISTER_TABLE_SIZE; i++) {
         if (strcmp(fpga_register_table[i].name, name) == 0) {
             return &fpga_register_table[i].reg;
+        }
+    }
+    return NULL;
+}
+
+const char *fpga_register_name(const FpgaRegister *reg)
+{
+    for (size_t i = 0; i < FPGA_REGISTER_TABLE_SIZE; i++) {
+        if (&fpga_register_table[i].reg == reg) {
+            return fpga_register_table[i].name;
         }
     }
     return NULL;

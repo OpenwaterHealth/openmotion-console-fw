@@ -183,7 +183,7 @@
       "supplier": {
         "name": "Lattice Semiconductor"
       },
-      "description": "MachXO2 I2C programming routines (c) 2011-2012; XO2_cmds adapted to STM32 HAL I2C. Used to program the console FPGAs at runtime.",
+      "description": "MachXO2 I2C programming routines (c) 2011-2012; XO2_cmds adapted to STM32 HAL I2C. Read-only entry points attest the console FPGAs at runtime (fpga_attest.c); the programming entry points exist in Factory builds only.",
       "scope": "required",
       "licenses": [
         {
@@ -201,6 +201,264 @@
         {
           "name": "openwater:version-status",
           "value": "undetermined - no version identifier in the source tree"
+        },
+        {
+          "name": "openwater:local-changes",
+          "value": "programming entry points compiled only into Factory builds (OW_FACTORY_PROGRAMMING); see Core/Src/LOCAL_CHANGES.md (PTR-2026-1-5 follow-up, 2026-10-22)"
+        }
+      ]
+    },
+    {
+      "type": "firmware",
+      "name": "openmotion-safety-fpga",
+      "supplier": {
+        "name": "Openwater (Open Water Internet Inc.)",
+        "url": [
+          "https://www.openwater.health"
+        ]
+      },
+      "version": "0.1.4",
+      "description": "Console laser-safety FPGA design (EE and OPT monitors, the laser interlock), Lattice MachXO2-2000. Not part of the MCU image: it is factory-programmed into the EE and OPT devices; the console firmware attests its configuration flash at boot against the digest recorded here.",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "name": "AGPL-3.0 (LICENSE file; -only / -or-later not stated)"
+          }
+        }
+      ],
+      "purl": "pkg:github/OpenwaterHealth/openmotion-safety-fpga@0.1.4",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/OpenwaterHealth/openmotion-safety-fpga"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/OpenwaterHealth/openmotion-safety-fpga/releases/tag/0.1.4"
+        }
+      ],
+      "properties": [
+        {
+          "name": "openwater:role",
+          "value": "fpga-bitstream"
+        },
+        {
+          "name": "openwater:repository",
+          "value": "openmotion-safety-fpga"
+        },
+        {
+          "name": "openwater:release-tag",
+          "value": "0.1.4"
+        },
+        {
+          "name": "openwater:artefact",
+          "value": "Safety_impl1.jed"
+        },
+        {
+          "name": "openwater:artefact-sha256",
+          "value": "42bc3d2e2391ade0ceb3de06aa6bbbc8a2b822df3df78e5cf6f6e426dd9228b3"
+        },
+        {
+          "name": "openwater:cfg-pages",
+          "value": "3198"
+        },
+        {
+          "name": "openwater:cfg-digest-sha256",
+          "value": "c79ede6c19911c9efe95818851e021677bd091e7262edcfab5d3151d6b3b4ad9"
+        },
+        {
+          "name": "openwater:console-device",
+          "value": "safety"
+        },
+        {
+          "name": "openwater:ufm-loader",
+          "value": "false"
+        },
+        {
+          "name": "openwater:evidence",
+          "value": "fpga-artefacts/openmotion-safety-fpga/0.1.4/Safety_impl1.jed (GitHub release asset of tag 0.1.4); digest compiled into the firmware by scripts/gen_fpga_digests.py and checked by Core/Src/fpga_attest.c"
+        }
+      ]
+    },
+    {
+      "type": "firmware",
+      "name": "openmotion-seed-fpga",
+      "supplier": {
+        "name": "Openwater (Open Water Internet Inc.)",
+        "url": [
+          "https://www.openwater.health"
+        ]
+      },
+      "version": "0.1.1",
+      "description": "Console seed-laser driver FPGA design, Lattice MachXO2-2000. Factory-programmed; attested at boot against the digest recorded here.",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "name": "AGPL-3.0 (LICENSE file; -only / -or-later not stated)"
+          }
+        }
+      ],
+      "purl": "pkg:github/OpenwaterHealth/openmotion-seed-fpga@0.1.1",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/OpenwaterHealth/openmotion-seed-fpga"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/OpenwaterHealth/openmotion-seed-fpga/releases/tag/0.1.1"
+        }
+      ],
+      "properties": [
+        {
+          "name": "openwater:role",
+          "value": "fpga-bitstream"
+        },
+        {
+          "name": "openwater:repository",
+          "value": "openmotion-seed-fpga"
+        },
+        {
+          "name": "openwater:release-tag",
+          "value": "0.1.1"
+        },
+        {
+          "name": "openwater:artefact",
+          "value": "seed_driver_impl1.jed"
+        },
+        {
+          "name": "openwater:artefact-sha256",
+          "value": "c8168a481b72d54b868a1e843d49513aa6a2dd85680491671a4dc292d625c696"
+        },
+        {
+          "name": "openwater:cfg-pages",
+          "value": "3198"
+        },
+        {
+          "name": "openwater:cfg-digest-sha256",
+          "value": "7104d28d4c24bd7dfade8d4dc8353bc4b1d96f58061cd2abfaaec372fbff68b6"
+        },
+        {
+          "name": "openwater:console-device",
+          "value": "seed"
+        },
+        {
+          "name": "openwater:ufm-loader",
+          "value": "false"
+        },
+        {
+          "name": "openwater:evidence",
+          "value": "fpga-artefacts/openmotion-seed-fpga/0.1.1/seed_driver_impl1.jed (GitHub release asset of tag 0.1.1); digest compiled into the firmware by scripts/gen_fpga_digests.py and checked by Core/Src/fpga_attest.c"
+        }
+      ]
+    },
+    {
+      "type": "firmware",
+      "name": "openmotion-ta-fpga",
+      "supplier": {
+        "name": "Openwater (Open Water Internet Inc.)",
+        "url": [
+          "https://www.openwater.health"
+        ]
+      },
+      "version": "1.1.0",
+      "description": "Console tapered-amplifier driver FPGA design, Lattice MachXO2-2000. Factory-programmed; attested at boot against the digest recorded here.",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "name": "AGPL-3.0 (LICENSE file; -only / -or-later not stated)"
+          }
+        }
+      ],
+      "purl": "pkg:github/OpenwaterHealth/openmotion-ta-fpga@1.1.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/OpenwaterHealth/openmotion-ta-fpga"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/OpenwaterHealth/openmotion-ta-fpga/releases/tag/1.1.0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "openwater:role",
+          "value": "fpga-bitstream"
+        },
+        {
+          "name": "openwater:repository",
+          "value": "openmotion-ta-fpga"
+        },
+        {
+          "name": "openwater:release-tag",
+          "value": "1.1.0"
+        },
+        {
+          "name": "openwater:artefact",
+          "value": "TA_Driver_impl1.jed"
+        },
+        {
+          "name": "openwater:artefact-sha256",
+          "value": "64f1c5de410cc007075ddd344700d0eeee38f1c8b954e66891ad35e7ba5f1371"
+        },
+        {
+          "name": "openwater:cfg-pages",
+          "value": "3198"
+        },
+        {
+          "name": "openwater:cfg-digest-sha256",
+          "value": "d0f5482cee5e893706ef1cefecb42d13d709dc21d53cd14f94ecf77935b0bae0"
+        },
+        {
+          "name": "openwater:console-device",
+          "value": "ta"
+        },
+        {
+          "name": "openwater:ufm-loader",
+          "value": "false"
+        },
+        {
+          "name": "openwater:evidence",
+          "value": "fpga-artefacts/openmotion-ta-fpga/1.1.0/TA_Driver_impl1.jed (GitHub release asset of tag 1.1.0); digest compiled into the firmware by scripts/gen_fpga_digests.py and checked by Core/Src/fpga_attest.c"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "SHA-256 (Core/Src/sha256.c)",
+      "supplier": {
+        "name": "Openwater (Open Water Internet Inc.)",
+        "url": [
+          "https://www.openwater.health"
+        ]
+      },
+      "version": "1.0.0",
+      "description": "First-party software SHA-256 (FIPS 180-4) used by fpga_attest.c to hash the FPGA configuration pages; the STM32H7 HASH peripheral is not enabled in this CubeMX configuration. Not third-party code: recorded here because the firmware's integrity check depends on it.",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "name": "Openwater first-party (repository licence)"
+          }
+        }
+      ],
+      "purl": "pkg:github/OpenwaterHealth/openmotion-console-fw@next#Core/Src/sha256.c",
+      "properties": [
+        {
+          "name": "openwater:evidence",
+          "value": "Core/Src/sha256.c, Core/Inc/sha256.h"
+        },
+        {
+          "name": "openwater:verification",
+          "value": "host_tests/test_sha256.c: FIPS 180-4 example vectors (empty, abc, 448-bit, 896-bit, one million 'a') and streaming equivalence"
+        },
+        {
+          "name": "openwater:first-party",
+          "value": "true"
         }
       ]
     }
