@@ -399,8 +399,13 @@ installed from DFU entered any other way (no valid firmware, or `enter-dfu`
 from a running Release application) boot. Debug and Factory images were
 never refused. An early guess that the image length mattered did not hold up
 (the same unpadded file later booted). Not root-caused, and not checked on
-bootloader 1.2.0. A unit in that state drops to DFU and recovers by
-installing the image again. Separately, `flash_firmware.py leave` after
+bootloader 1.2.0 for that entry. On bootloader 1.2.0 (2026-10-26, rc.3
+production image) `enter-dfu` from a running Release application followed by
+the signed rc.3 slot image was accepted and booted, and an image signed with
+the 1.0.0 key was refused before any erase (`errVENDOR`, installed image
+intact); the failing case, entry from a Debug or Factory application, needs a
+Debug-build-type image signed with the KMS key and has not been repeated. A
+unit in that state drops to DFU and recovers by installing the image again. Separately, `flash_firmware.py leave` after
 `enter-dfu` with no download leaves the unit in DFU (the slot is intact):
 install an image to leave.
 
@@ -414,34 +419,64 @@ I2C configuration port. Programming it through the Factory image left the
 seed device of the bench console unreachable over I2C (configuration and
 user port both silent, also after a power cycle; recovery needs the device's
 JTAG). With that device silent the Release-policy image reports the seed as
-READ_FAIL, the run as FAILED and refuses the trigger with 0x40, which is the
-negative path of TC-FPGA-009 by the read-failure route; the digest-mismatch
-route stays to be run after the JTAG recovery. The Factory image
-now refuses a FEABITS value with that bit set (`if_fpga_prog.c`,
+READ_FAIL and the run as FAILED. That was the read-failure route at a time
+when all four devices were attested; since the 2026-10-22 decision the seed
+is "not checked", so a seed fault no longer exercises this path. The Factory
+image now refuses a FEABITS value with that bit set (`if_fpga_prog.c`,
 FEATROW_WRITE), and the SDK programmer should refuse it too.
 
 1. Build and flash the `Factory` preset.
-2. With the SDK `FpgaPageProgrammer`, program ONE device (the seed driver is
-   the least consequential) with a bitstream that differs from the released
-   one (for example the same design with a different USERCODE is NOT enough,
-   since USERCODE is excluded; flip one fuse in a copy of the `.jed` so the
-   design still loads, or program a previous release tag).
-3. Flash the Release/Debug image again. Expected: the attestation logs
-   `FAIL` for that device, `OW_CMD_FPGA_ATTEST` shows the digest mismatch,
-   boot-info reports state 3 with the 0x40 interlock, `OW_CTRL_START_TRIG`
-   is refused with 0x40 in the status byte, and
-   `tests/test_safety_state_hil.py` with `OPENMOTION_HIL_REPROGRAM=1` passes.
-4. Recovery: Factory image, program the released `.jed` from
-   `fpga-artefacts/`, re-provision the UFM record (section 6.4), flash the
-   Release image; the attestation passes again.
+2. With the SDK `FpgaPageProgrammer`, program ONE of the two attested
+   safety devices (EE, mux 0 channel 2, or OPT, channel 3) with a bitstream
+   that differs from the released one. Do not use the seed or TA device:
+   they are not attested (section 2.2), so a change there is reported "not
+   checked" and the run still passes. A different USERCODE is NOT enough,
+   since USERCODE is excluded. Flip one fuse in a copy of the released
+   `.jed`, inside the first 3198 pages (fuse index < 3198 x 128), keep the
+   `E` field (feature row) and adjust the `C` checksum. A fuse in a blank
+   row past the design's last used row leaves the design loadable.
+3. The programmer erases the whole device (`ERASE_ALL`), the UFM included,
+   so re-provision that device's safety record (section 6.4 step 3) before
+   leaving the Factory image. Otherwise the device also reports `UFM blank`
+   and the test does not isolate the digest route.
+4. Flash the Release/Debug image and power-cycle the console fully.
+   Expected: the attestation logs `FAIL` for that device with status
+   `DIGEST | UFM_VALID` (0x11), the other safety device passes,
+   `OW_CMD_FPGA_ATTEST` shows the digest mismatch, boot-info reports state
+   3 with the 0x40 interlock, `OW_CTRL_START_TRIG` is refused with 0x40 in
+   the status byte, and `tests/test_safety_state_hil.py` with
+   `OPENMOTION_HIL_REPROGRAM=1` passes
+   `test_modified_bitstream_sets_interlock_and_blocks_arming`. The three
+   tests that expect a correctly programmed unit fail in this state by
+   design (boot attestation, attestation on request, `OW_FPGA_PROG`
+   refusal, which also checks the digests).
+5. Recovery: Factory image, program the released `.jed` from
+   `fpga-artefacts/`, re-provision the UFM record (section 6.4), power-cycle,
+   flash the Release image; the attestation passes again.
+
+**Result (2026-10-26, bench console 338435643333, firmware `next`
+b51e36b, Factory-BareMetal then Release-BareMetal over SWD).** EE was
+programmed with a copy of safety 0.1.4 `Safety_impl1.jed` with fuse 384000
+(page 3000, a blank row; the design's last used row is 1597) set to 1, `C`
+field 0x8947 -> 0x8948, feature row and FEABITS identical. Programming took
+205 s, CFG verify passed on 3838 pages, and status after REFRESH was
+0x00080100 (DONE set, design loaded). The EE record was re-provisioned with
+the 2026-10-22 bench values and read back. After a full power cycle the
+Release image reported EE digest `3d15e453...46213d8` against the expected
+`c79ede6c...3b4ad9`, EE status 0x11, OPT PASS with `UFM valid`, interlock
+0x40 set, and the trigger start was refused with 0x40.
+`test_modified_bitstream_sets_interlock_and_blocks_arming` passed (TC-FPGA-009
+by the digest-mismatch route), together with the config-refusal, TEC-trip and
+I2C health tests (TA answered after the power cycle).
 
 ### 6.3 Variation check (same `.jed` programmed twice)
 
 Purpose: establish empirically that no byte inside the hashed pages varies
 between programmings of the same bitstream. Procedure: on a bench unit
-running a Factory image, read the 3198 pages of the seed device
+running a Factory image, read the 3198 pages of one safety device (EE or OPT)
 (`OW_CMD_FPGA_PROG_CFG_RESET` + `CFG_READ_PAGE` x 3198), program the same
-released `.jed` with the SDK programmer, read the pages again, and diff; then
+released `.jed` with the SDK programmer (it erases the UFM: re-provision the
+record afterwards, section 6.4), read the pages again, and diff; then
 compare with a second board if one is available. Result: not run yet (see
 section 5 for what the single-unit attestation already establishes).
 The design of the check does not depend on the outcome: USERCODE, feature row
