@@ -485,10 +485,17 @@ and trace ID are outside the pages, and the attestation on the first unit
 
 ### 6.4 Factory process (manufacturing and RMA bench)
 
-1. Build `cmake --preset Factory && cmake --build build/Factory`. The image
-   version carries `-factory`; the boot banner says so; boot-info bit 0 of
-   `build` is set. It is signed and installed like any bench image (local
-   test key against a Debug bootloader) and must never be signed with the
+1. Install the Factory image of the release. The clinical build of every
+   tag stores it with the release:
+   `gs://openwater-firmware-artifacts/openmotion-console-fw/<tag>/openmotion-console-fw-<tag>-factory-baremetal.{bin,hex}`
+   (preset `Factory-BareMetal`, same commit as the clinical image, listed in
+   `SHA256SUMS` and the manifest). It is unsigned and has no bootloader:
+   flash it at 0x08000000 over SWD on an unlocked unit
+   (`BENCH-ERASE-PROTECTED-UNIT.md` for a unit under a Release bootloader).
+   The image version carries `-factory`; the boot banner says so; boot-info
+   bit 0 of `build` is set. A local build (`cmake --preset Factory-BareMetal`,
+   or `Factory` signed with a local test key against a Debug bootloader) is
+   for development only. A Factory image must never be signed with the
    clinical key.
 2. Program the FPGAs with the released artefacts from `fpga-artefacts/`
    (SDK `FpgaPageProgrammer.program_from_jedec`).
@@ -507,7 +514,7 @@ and trace ID are outside the pages, and the attestation on the first unit
    design). Read the record back (`safety_ufm_record.py decode --device ...`).
    Then power-cycle the console fully (bench observation 2026-10-22,
    section 6.1).
-4. Install the Release (clinical) image. Its attestation must report
+4. Install the Release (clinical) image of the same tag. Its attestation must report
    `UFM valid` for EE and OPT and the run PASS; the stored
    configuration is migrated to v3 (safety keys dropped) at first boot. A
    unit that reports `UFM blank` or an invalid record goes back to step 3.

@@ -12,6 +12,15 @@ name: Clinical build
 #                                                       onto a blank MCU.
 #   openmotion-console-fw-<tag>-signed.bin              signed application only, for field
 #                                                       update over USB DFU (flash_firmware.py).
+#   openmotion-console-fw-<tag>-factory-baremetal.bin / .hex
+#                                                       BENCH ONLY: the Factory-BareMetal preset
+#                                                       (FPGA/UFM programming compiled in), built
+#                                                       from the same commit. UNSIGNED, never
+#                                                       signed: a bootloader refuses it. Flash at
+#                                                       0x08000000 over SWD on an unlocked unit to
+#                                                       run WI-00015 calibration and commit the
+#                                                       safety record (docs/fpga-attestation.md 6.4);
+#                                                       then flash the clinical image back.
 #   SHA256SUMS, clinical-build-manifest.json
 #
 # and stores them ONLY as an immutable copy in
@@ -120,6 +129,27 @@ jobs:
       - name: Check the clinical image contains no FPGA programming code
         run: |
           docker run --rm             -v "$GITHUB_WORKSPACE":/workspace             -w /workspace             ghcr.io/openwaterhealth/stm32-build-env:latest             bash -lc "scripts/check_release_symbols.sh build/Release/${PRODUCT}.elf"
+
+      # ---------------------------
+      # Factory image, kept with the release so the calibration bench runs the
+      # exact firmware of this tag. Bare-metal (no bootloader) and never signed:
+      # it cannot be installed through any bootloader, only over SWD on an
+      # unlocked bench unit. The check is inverted: a Factory image that lacks
+      # the programming code would be useless on the bench.
+      # ---------------------------
+      - name: Build Factory image (bench only, bare-metal @0x08000000, unsigned)
+        run: |
+          set -euo pipefail
+          docker run --rm             -v "$GITHUB_WORKSPACE":/workspace             -w /workspace             ghcr.io/openwaterhealth/stm32-build-env:latest             bash -lc "git config --global --add safe.directory /workspace && cmake --preset Factory-BareMetal && cmake --build build/Factory-BareMetal --target all -j 10"
+          if docker run --rm -v "$GITHUB_WORKSPACE":/workspace -w /workspace ghcr.io/openwaterhealth/stm32-build-env:latest                bash -lc "scripts/check_release_symbols.sh build/Factory-BareMetal/${PRODUCT}.elf" >/dev/null 2>&1; then
+            echo "::error::the Factory image contains no FPGA programming code" >&2
+            exit 1
+          fi
+          grep -aq -- "-factory" "build/Factory-BareMetal/${PRODUCT}.bin"             || { echo "::error::the Factory image does not report a -factory version" >&2; exit 1; }
+          mkdir -p _artifacts
+          for ext in bin hex; do
+            cp "build/Factory-BareMetal/${PRODUCT}.$ext" "_artifacts/${OUT}-${GITHUB_REF_NAME}-factory-baremetal.$ext"
+          done
 
       - name: Resolve bootloader release tag
         id: bl
@@ -267,6 +297,10 @@ jobs:
             "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd="..").decode().strip(),
             "built_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "build_config": "Release",
+            "factory_image": {"files": [f for f in sums if "-factory-baremetal." in f],
+                              "preset": "Factory-BareMetal", "flash_address": "0x08000000",
+                              "signed": False,
+                              "use": "bench only: WI-00015 calibration and safety-record commit; never install on a clinical unit"},
             "fw_version_uint16": int(os.environ["FWVER"]),
             "bootloader": {"repo": os.environ["BL_REPO"], "tag": os.environ["BL_TAG"], "sha256": os.environ["BL_SHA"]},
             "signing": {"kms_key_version": os.environ["KMS_KEY"],
