@@ -24,8 +24,9 @@ permissions:
 # sign the slot image locally with the bootloader repo's py-tools/sign_firmware.py.
 #
 # The "Factory" preset (FPGA/UFM programming and safety-parameter overrides
-# compiled in) is never built here or by clinical-build.yml: it is a local
-# bench build only (docs/fpga-attestation.md).
+# compiled in) is never built here. clinical-build.yml builds Factory-BareMetal
+# from the release tag and keeps it, unsigned, with that release in the private
+# bucket for the calibration bench (docs/fpga-attestation.md 6.4).
 #
 # Setup and operations: OpenwaterHealth/OpenWater-KMS, docs/RUNBOOK-kms-signing-setup.md.
 # ---------------------------------------------------------------------------
