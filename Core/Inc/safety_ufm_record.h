@@ -119,6 +119,15 @@ bool safety_ufm_limits_in_envelope(const safety_ufm_limits_t *l, uint8_t device)
 /* Short name of a status for logs and the host message. */
 const char *safety_ufm_status_name(safety_ufm_status_t s);
 
+/* Whether a record status is an attestation fault (latched
+ * TRIG_INTERLOCK_FPGA_ATTEST). Every status but VALID is one, except that a
+ * Factory build (OW_FACTORY_PROGRAMMING) accepts a BLANK record: a new unit
+ * has none until WI-00015 Safety Calibration has run and been committed, and
+ * that calibration has to fire the laser. The Factory image then applies the
+ * safety keys of the stored configuration (within the hard bounds) as the
+ * limits. Release and Debug builds never fire without a valid record. */
+bool safety_ufm_status_is_fault(safety_ufm_status_t s);
+
 /* Encode a record (host tests; scripts/safety_ufm_record.py for the bench). */
 void safety_ufm_record_encode(const safety_ufm_limits_t *in,
                               uint8_t out[SAFETY_UFM_RECORD_SIZE]);

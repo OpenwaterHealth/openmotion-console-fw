@@ -382,8 +382,13 @@ static void apply_safety_loads(void)
     size_t n = safety_reg_loads(ee, opt, loads, SAFETY_REG_LOADS_MAX);
 
     if (ee == NULL || opt == NULL) {
+#if defined(OW_FACTORY_PROGRAMMING)
+        printf("Safety record: EE %s, OPT %s; a device without one keeps its design limits until the stored configuration's safety keys override them (Factory image)\r\n",
+               ee ? "valid" : "none", opt ? "valid" : "none");
+#else
         printf("Safety record: EE %s, OPT %s; a device without one keeps its design limits and the laser stays interlocked\r\n",
                ee ? "valid" : "none", opt ? "valid" : "none");
+#endif
     }
     motion_cfg_set_unit_ceiling("TA_PULSE_WIDTH", safety_ta_pulse_width_max_us(ee, opt));
     for (size_t i = 0; i < n; i++) {

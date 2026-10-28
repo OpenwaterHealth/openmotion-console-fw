@@ -232,7 +232,8 @@ static bool read_loader_status(const attest_entry_t *e, uint8_t *out)
  * safety record, safety_ufm_record.h). A read failure is a read fault; a
  * blank, invalid or out-of-envelope record, or a loader bitstream that
  * reports it did not apply the record, is a record fault. Every one of
- * them keeps the interlock. */
+ * them keeps the interlock, except a blank record on a Factory image
+ * (safety_ufm_status_is_fault: the unit has not been calibrated yet). */
 static void step_ufm(void)
 {
     const attest_entry_t *e = &s_attest[s_idx];
@@ -260,7 +261,12 @@ static void step_ufm(void)
                 s_ufm_valid[s_dev] = true;
                 s_report.dev[s_dev].status |= FPGA_ATTEST_ST_UFM_VALID;
             } else if (st == SAFETY_UFM_BLANK) {
-                dev_fail(FPGA_ATTEST_ST_UFM_BLANK);
+                if (safety_ufm_status_is_fault(st)) {
+                    dev_fail(FPGA_ATTEST_ST_UFM_BLANK);
+                } else {
+                    printf("FPGA attestation: %s UFM blank; Factory image, the stored configuration's limits apply\r\n",
+                           s_dev_name[s_dev]);
+                }
             } else {
                 dev_fail(FPGA_ATTEST_ST_UFM_INVALID);
             }

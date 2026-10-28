@@ -135,6 +135,16 @@ const char *safety_ufm_status_name(safety_ufm_status_t s)
     }
 }
 
+bool safety_ufm_status_is_fault(safety_ufm_status_t s)
+{
+#if defined(OW_FACTORY_PROGRAMMING)
+    if (s == SAFETY_UFM_BLANK) {
+        return false;
+    }
+#endif
+    return s != SAFETY_UFM_VALID;
+}
+
 void safety_ufm_record_encode(const safety_ufm_limits_t *in, uint8_t out[SAFETY_UFM_RECORD_SIZE])
 {
     memset(out, 0, SAFETY_UFM_RECORD_SIZE);

@@ -229,6 +229,17 @@ int main(void)
         assert(safety_ta_pulse_width_max_us(&o, &o) == (double)SAFETY_TA_PULSE_WIDTH_MAX_US);
     }
 
+    /* ---- which record states interlock the laser ---- */
+    assert(!safety_ufm_status_is_fault(SAFETY_UFM_VALID));
+    assert(safety_ufm_status_is_fault(SAFETY_UFM_BAD_CHECKSUM));
+    assert(safety_ufm_status_is_fault(SAFETY_UFM_OUT_OF_BOUNDS));
+    assert(safety_ufm_status_is_fault(SAFETY_UFM_LOADER_FALLBACK));
+#if defined(OW_FACTORY_PROGRAMMING)
+    assert(!safety_ufm_status_is_fault(SAFETY_UFM_BLANK));  /* a new unit can be calibrated */
+    printf("safety_ufm_record host tests OK (Factory)\n");
+#else
+    assert(safety_ufm_status_is_fault(SAFETY_UFM_BLANK));   /* Release/Debug never fire without a record */
     printf("safety_ufm_record host tests OK\n");
+#endif
     return 0;
 }

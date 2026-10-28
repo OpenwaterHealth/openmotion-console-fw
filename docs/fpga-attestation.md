@@ -118,7 +118,8 @@ apply the record, sets `TRIG_INTERLOCK_FPGA_ATTEST` (0x40). The interlock
 byte has no free bit (0x80 is the timer-start failure), so record faults
 share 0x40; the attestation report says which: device status bit 0x08
 (blank) or 0x04 (invalid), `ufm_status` (`safety_ufm_status_t`) and
-`loader_status`. The bit is also set from reset until
+`loader_status`. A blank record is not a fault on a Factory image (section
+2.4). The bit is also set from reset until
 the first run passes. While it is set `Trigger_Start()` refuses and the
 refusal status byte carries the bit; after a FAILED run `Trigger_SetConfig()`
 refuses too. The interlock is sticky until a run passes. A failed run stops
@@ -203,6 +204,22 @@ loader bitstream) 0x31 other than 0x2F, is a latched
 there is no fallback to the rated limits. A device without a valid record
 gets no limit writes from the firmware: its registers keep the design reset
 values, which are conservative, and the interlock keeps the laser off.
+
+**Exception: a blank record on a Factory image** (`safety_ufm_status_is_fault`,
+added after 1.8.2-rc.4). A new unit has no record until WI-00015 Safety
+Calibration has run and been committed, and that calibration has to fire the
+laser to measure the monitors. With every record blank, no unit could ever be
+calibrated. So a Factory image (section 6.4) does not count a *blank* record
+as an attestation fault: the device reports UFM status blank with no fault
+bit, and the safety keys of the stored configuration (written by the laser
+calibration from `DEFAULT_USER_CONFIG`, then by Safety Calibration) are the
+limits, applied as Factory overrides within the envelope. The configuration
+digest is still checked, and a corrupt, out-of-envelope or loader-fallback
+record still fails. Release and Debug images are unchanged: a blank record
+is a latched 0x40, so a unit that left the bench without a committed record
+can never fire. Found 2026-10-28 on QWW04Q10018 (1.8.2-rc.4-factory, blank
+UFM): Safety Calibration stopped at laser bring-up with "EE: no safety record
+(UFM blank); OPT: no safety record (UFM blank)".
 
 **Which values are calibrated per unit (WI-00015, checked 2026-10-22 against
 `omotion/calibration/safety.py`, `safety_workflow.py`, `laser.py`).**
@@ -505,7 +522,11 @@ and trace ID are outside the pages, and the attestation on the first unit
    clinical key.
 2. Program the FPGAs with the released artefacts from `fpga-artefacts/`
    (SDK `FpgaPageProgrammer.program_from_jedec`).
-3. Run WI-00015 laser and safety calibration. On a Factory image the
+3. Run WI-00015 laser and safety calibration. A new unit's UFM is blank;
+   the Factory image accepts that (section 2.4), so the calibration can fire
+   before any record exists. The laser calibration writes the configuration
+   first (`DEFAULT_USER_CONFIG`); Safety Calibration refuses a unit with no
+   configuration. On a Factory image the
    calibration tooling may still write the safety keys into the
    configuration (they are accepted within the hard bounds as overrides);
    the resulting per-unit values are then written into each safety device's

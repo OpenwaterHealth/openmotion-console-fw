@@ -28,6 +28,8 @@ test_safety_ufm_record: test_safety_ufm_record.c ../Core/Src/safety_ufm_record.c
                         ../Core/Src/fpga_register_map.c ../Core/Src/motion_cfg_keys.c ../Core/Src/jsmn.c
 	$(CC) $(CFLAGS) -o $@ $< ../Core/Src/safety_ufm_record.c ../Core/Src/safety_envelope.c \
 	    ../Core/Src/fpga_register_map.c ../Core/Src/motion_cfg_keys.c ../Core/Src/jsmn.c -lm
+	$(CC) $(CFLAGS) -DOW_FACTORY_PROGRAMMING=1 -o $@_factory $< ../Core/Src/safety_ufm_record.c ../Core/Src/safety_envelope.c \
+	    ../Core/Src/fpga_register_map.c ../Core/Src/motion_cfg_keys.c ../Core/Src/jsmn.c -lm
 
 # Built twice: with the Release policy (safety keys refused) and with the
 # Factory policy (OW_FACTORY_PROGRAMMING: safety keys accepted within bounds).
@@ -50,10 +52,11 @@ run: $(TESTS)
 	./test_jsmn_strict
 	./test_sha256
 	./test_safety_ufm_record
+	./test_safety_ufm_record_factory
 	./test_motion_cfg_keys
 	./test_motion_cfg_keys_factory
 	./test_fpga_digest
 
 clean:
-	rm -f $(TESTS) test_motion_cfg_keys_factory
+	rm -f $(TESTS) test_motion_cfg_keys_factory test_safety_ufm_record_factory
 	rm -rf generated
