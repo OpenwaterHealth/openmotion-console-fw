@@ -60,8 +60,7 @@ typedef enum {
 bool motion_cfg_safety_keys_writable(void);
 
 /* Lower an operational key's ceiling for this unit (the per-unit safety
- * record: TA_CURRENT_DRV <= EE_DRIVE_CL, TA_PULSE_WIDTH <= EE/OPT
- * PULSE_WIDTH_UL). Never raises it above the rule's max. Applies to host
+ * record: TA_PULSE_WIDTH <= EE/OPT PULSE_WIDTH_UL). Never raises it above the rule's max. Applies to host
  * config writes, the stored-record apply and the I2C pass-through. */
 void motion_cfg_set_unit_ceiling(const char *name, double max);
 

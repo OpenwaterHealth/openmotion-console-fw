@@ -183,12 +183,18 @@ inside the envelope. A VALID record is then:
 - written into that device's limit registers verbatim and read back
   (`safety_envelope.c`, `motion_cfg_apply_settings()`, after every completed
   attestation and every configuration apply);
-- the source of the unit's ceilings for the host setpoints:
-  `TA_CURRENT_DRV <= EE DRIVE_CL` and `TA_PULSE_WIDTH <=` the smaller of the
-  EE/OPT `PULSE_WIDTH_UL`, each also capped by the envelope
-  (`motion_cfg_set_unit_ceiling()`). The ceilings apply to host
+- the source of the unit's ceiling for the host setpoint `TA_PULSE_WIDTH`:
+  the smaller of the EE/OPT `PULSE_WIDTH_UL`, also capped by the envelope
+  (`motion_cfg_set_unit_ceiling()`). The ceiling applies to host
   configuration writes, to the stored-record apply and to the I2C
-  pass-through.
+  pass-through. `TA_CURRENT_DRV` has no per-unit ceiling, only the
+  envelope's 5000 mA: it is a commanded current, while `DRIVE_CL` limits the
+  EE monitor's *measured* current in that monitor's ADC scale, and the EE
+  FPGA enforces it against the measurement. On the bench the monitor reads
+  about 90% of the command (WWW04Q40006: 4750 -> 4272; QWW04Q10018:
+  4000 -> 3563), so WI-00015's `DRIVE_CL` = 1.1 x measured lands just below
+  the command; a `TA_CURRENT_DRV <= DRIVE_CL` ceiling (removed after
+  1.8.2-rc.3) refused every unit's own calibrated setpoint.
 
 A blank UFM (all 0x00 or 0xFF: the released bitstreams carry no UFM
 initialisation), a corrupt record, a value outside the envelope, or (on a
@@ -227,7 +233,7 @@ the application's opaque `calibration` block:
 
 | Key | Range | Source of the bound |
 |---|---|---|
-| `TA_CURRENT_DRV` | 0..5000 mA, and <= the unit's EE `DRIVE_CL` | WI-00015 default 5000; safety FPGA drive rating; per-unit record |
+| `TA_CURRENT_DRV` | 0..5000 mA | WI-00015 default 4950; safety FPGA drive rating (the unit's EE `DRIVE_CL` is enforced by the EE FPGA on the measured current) |
 | `TA_PULSE_WIDTH` | 1..600 us, and <= the unit's EE/OPT `PULSE_WIDTH_UL` | WI-00015 `MAX_TA_PULSE_WIDTH_US`; per-unit record |
 | `SEED_CW_GAIN` | 0..160 | seed CW current limit (registers.v) |
 | `SEED_DDS_GAIN` | 0..160 | pending DC-00052 §9 |

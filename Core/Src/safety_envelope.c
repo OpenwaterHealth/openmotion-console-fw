@@ -94,18 +94,6 @@ size_t safety_reg_loads(const safety_ufm_limits_t *ee, const safety_ufm_limits_t
     return n;
 }
 
-double safety_ta_current_drv_max_ma(const safety_ufm_limits_t *ee)
-{
-    double m = (double)SAFETY_TA_CURRENT_DRV_MAX_MA;
-    if (ee != NULL) {
-        double unit = (double)ee->drive_cl * SAFETY_FPGA_DRIVE_LSB;
-        if (unit < m) {
-            m = unit;
-        }
-    }
-    return m;
-}
-
 double safety_ta_pulse_width_max_us(const safety_ufm_limits_t *ee, const safety_ufm_limits_t *opt)
 {
     double m = (double)SAFETY_TA_PULSE_WIDTH_MAX_US;

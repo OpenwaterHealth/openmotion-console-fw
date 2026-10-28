@@ -298,8 +298,8 @@ void delay_ms_wdg(uint32_t ms)
  *      values, and the attestation interlock keeps the laser off.
  *   2. The OPERATIONAL point from the stored configuration record:
  *      TA_CURRENT_DRV, TA_PULSE_WIDTH, SEED_CW_GAIN, SEED_DDS_GAIN, each
- *      range-checked against the envelope, lowered by the unit's record
- *      (motion_cfg_set_unit_ceiling: the same ceilings apply to host config
+ *      range-checked against the envelope; TA_PULSE_WIDTH is also lowered by
+ *      the unit's record (motion_cfg_set_unit_ceiling: the ceiling applies to host config
  *      writes and to the I2C pass-through). Safety keys and unknown keys in
  *      the record are ignored and logged (they cannot be stored by this
  *      firmware; see motion_config.c).
@@ -385,7 +385,6 @@ static void apply_safety_loads(void)
         printf("Safety record: EE %s, OPT %s; a device without one keeps its design limits and the laser stays interlocked\r\n",
                ee ? "valid" : "none", opt ? "valid" : "none");
     }
-    motion_cfg_set_unit_ceiling("TA_CURRENT_DRV", safety_ta_current_drv_max_ma(ee));
     motion_cfg_set_unit_ceiling("TA_PULSE_WIDTH", safety_ta_pulse_width_max_us(ee, opt));
     for (size_t i = 0; i < n; i++) {
         if (fpga_write_raw(loads[i].reg, loads[i].raw)) {

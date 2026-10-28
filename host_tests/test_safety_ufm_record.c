@@ -217,11 +217,8 @@ int main(void)
     assert(n == 18);
 
     /* ---- operating-point ceilings: the record can only lower them ---- */
-    assert(safety_ta_current_drv_max_ma(NULL) == (double)SAFETY_TA_CURRENT_DRV_MAX_MA);
     assert(safety_ta_pulse_width_max_us(NULL, NULL) == (double)SAFETY_TA_PULSE_WIDTH_MAX_US);
     {
-        double c = safety_ta_current_drv_max_ma(&g);           /* 2304 x 1.86 = 4285.44 */
-        assert(c > 4285.4 && c < 4285.5);
         double p = safety_ta_pulse_width_max_us(&g, NULL);     /* 1718 x 0.32 = 549.76 */
         assert(p > 549.7 && p < 549.8);
         safety_ufm_limits_t o = good();
@@ -230,8 +227,6 @@ int main(void)
         assert(p > 479.9 && p < 480.1);
         o.pulse_width_ul = 2062;                               /* 659.84 us: never above 600 */
         assert(safety_ta_pulse_width_max_us(&o, &o) == (double)SAFETY_TA_PULSE_WIDTH_MAX_US);
-        o.drive_cl = 2688;                                     /* 4999.68 */
-        assert(safety_ta_current_drv_max_ma(&o) < (double)SAFETY_TA_CURRENT_DRV_MAX_MA);
     }
 
     printf("safety_ufm_record host tests OK\n");

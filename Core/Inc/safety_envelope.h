@@ -76,7 +76,7 @@ extern "C" {
 
 /* ---- TA driver FPGA, registers.v of openmotion-ta-fpga ------------------- */
 #define SAFETY_TA_PULSE_WIDTH_MAX_US      600U    /* bound for the operational TA_PULSE_WIDTH: WI-00015 MAX_TA_PULSE_WIDTH_US; further lowered to the unit's EE/OPT PULSE_WIDTH_UL */
-#define SAFETY_TA_CURRENT_DRV_MAX_MA      5000U   /* bound for the operational TA_CURRENT_DRV: the EE drive rating above; further lowered to the unit's EE_DRIVE_CL; pending DC-00052 §9 */
+#define SAFETY_TA_CURRENT_DRV_MAX_MA      5000U   /* bound for the operational TA_CURRENT_DRV: the EE drive rating above (no per-unit ceiling, see safety_ta_pulse_width_max_us); pending DC-00052 §9 */
 #define SAFETY_TA_CURRENT_DRV_MIN_MA      0U      /* 0 = laser off; WI-00015 calibration floor is 2000 mA but a lower value is safe */
 #define SAFETY_TA_CURRENT_LIMIT_MA        5500U   /* fixed: registers.v reset drive_current_limit 0x8647 = 34375 x 0.160 mA ("Drive current: 5500mA"), the driver's own clamp */
 #define SAFETY_TA_PWM_MON_CL              88U     /* fixed: registers.v reset pwm_mon_current_limit 0x00b0 = 176 x 0.500 */
@@ -110,10 +110,11 @@ typedef struct {
 size_t   safety_reg_loads(const struct safety_ufm_limits *ee, const struct safety_ufm_limits *opt,
                           safety_reg_load_t *out, size_t max);
 uint32_t safety_eng_to_raw(const char *reg, double eng);
-/* Ceilings for the operational TA_CURRENT_DRV (mA) / TA_PULSE_WIDTH (us): the
- * envelope bound, lowered by the unit's records (EE_DRIVE_CL; the smaller of
- * EE/OPT_PULSE_WIDTH_UL). A NULL record leaves the envelope bound. */
-double   safety_ta_current_drv_max_ma(const struct safety_ufm_limits *ee);
+/* Ceiling for the operational TA_PULSE_WIDTH (us): the envelope bound, lowered
+ * by the smaller of the unit's EE/OPT_PULSE_WIDTH_UL. A NULL record leaves the
+ * envelope bound. TA_CURRENT_DRV has no per-unit ceiling: it is a commanded
+ * current, EE_DRIVE_CL a limit on the EE monitor's measured current in its own
+ * ADC scale, and the EE FPGA enforces that limit against the measurement. */
 double   safety_ta_pulse_width_max_us(const struct safety_ufm_limits *ee, const struct safety_ufm_limits *opt);
 
 #ifdef __cplusplus
