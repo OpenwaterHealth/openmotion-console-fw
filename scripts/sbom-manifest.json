@@ -66,7 +66,7 @@
         },
         {
           "name": "openwater:known-vulnerability-note",
-          "value": "CVE-2026-88369 is recorded against jsmn; see CVA J3"
+          "value": "CVE-2026-88369 (example/jsondump.c dump(); the example is not compiled) and CVE-2026-95117 (jsmn issue #249: in non-strict mode a STRING or PRIMITIVE token can get size > 0, and a caller that walks by size reads past the token array; upstream PR #250 changes only the example and was closed unmerged) are recorded against jsmn. Contained in this firmware: the only size-driven token walk (motion_cfg_apply_settings in Core/Src/main.c with motion_cfg_skip_token in Core/Src/motion_cfg_keys.c) bounds every step by the parsed token count; json_strict.c, motion_config.c and trigger.c do not read size. See CVA J3"
         },
         {
           "name": "openwater:evidence",
