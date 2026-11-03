@@ -63,3 +63,5 @@ host_tests/generated/
 host_tests/test_*
 !host_tests/test_*.c
 tests/__pycache__/
+__pycache__/
+*.py[cod]

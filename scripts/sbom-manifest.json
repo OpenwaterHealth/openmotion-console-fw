@@ -35,7 +35,7 @@
         "name": "Serge Zaitsev"
       },
       "version": "0.0.0-20141117-cf38b7d",
-      "description": "JSON tokenizer (jsmn.c/jsmn.h) from https://github.com/zserge/jsmn, built without JSMN_STRICT. The in-tree copy predates the first upstream release (v1.0.0): it is closest to upstream commit cf38b7d (2014-11-17) and is locally modified (extra \"reserved\" argument on jsmn_init/jsmn_parse).",
+      "description": "JSON tokenizer (jsmn.c/jsmn.h) from https://github.com/zserge/jsmn, built with JSMN_STRICT (CMakeLists.txt; CVA O3/R7). The in-tree copy predates the first upstream release (v1.0.0): it is closest to upstream commit cf38b7d (2014-11-17) and is locally modified (extra \"reserved\" argument on jsmn_init/jsmn_parse).",
       "scope": "required",
       "licenses": [
         {
@@ -156,7 +156,7 @@
         "name": "STMicroelectronics"
       },
       "version": "2.11.3",
-      "description": "USB device stack. Does not contain the v2.11.6 endpoint-index fix.",
+      "description": "USB device stack. The v2.11.6 endpoint-index bound (USBD_StdEPReq) and length-bounded USBD_GetString are applied as local changes (LOCAL_CHANGES.md; CVA O2/R7).",
       "scope": "required",
       "licenses": [
         {
@@ -183,7 +183,7 @@
       "supplier": {
         "name": "Lattice Semiconductor"
       },
-      "description": "MachXO2 I2C programming routines (c) 2011-2012; XO2_cmds adapted to STM32 HAL I2C. Read-only entry points attest the console FPGAs at runtime (fpga_attest.c); the programming entry points exist in Factory builds only.",
+      "description": "MachXO2 I2C programming routines (c) 2011-2012; XO2_cmds adapted to STM32 HAL I2C. Read-only entry points attest the EE and OPT safety FPGAs at runtime (fpga_attest.c); the programming entry points exist in Factory builds only.",
       "scope": "required",
       "licenses": [
         {
@@ -218,7 +218,7 @@
         ]
       },
       "version": "0.1.4",
-      "description": "Console laser-safety FPGA design (EE and OPT monitors, the laser interlock), Lattice MachXO2-2000. Not part of the MCU image: it is factory-programmed into the EE and OPT devices; the console firmware attests its configuration flash at boot against the digest recorded here.",
+      "description": "Console laser-safety FPGA design (EE and OPT monitors, the laser interlock), Lattice MachXO2-2000. Not part of the MCU image: it is factory-programmed into the EE and OPT devices; the console firmware attests its configuration flash at boot and on request (OW_CMD_FPGA_ATTEST) against the digest recorded here.",
       "scope": "required",
       "licenses": [
         {
@@ -291,7 +291,7 @@
         ]
       },
       "version": "0.1.1",
-      "description": "Console seed-laser driver FPGA design, Lattice MachXO2-2000. Factory-programmed; attested at boot against the digest recorded here.",
+      "description": "Console seed-laser driver FPGA design, Lattice MachXO2-2000. Factory-programmed. Not attested at runtime: fpga_attest.c checks the EE and OPT safety devices only (decision 2026-10-22) and reports the seed device as not checked; the digest recorded here is reference data.",
       "scope": "required",
       "licenses": [
         {
@@ -350,7 +350,7 @@
         },
         {
           "name": "openwater:evidence",
-          "value": "fpga-artefacts/openmotion-seed-fpga/0.1.1/seed_driver_impl1.jed (GitHub release asset of tag 0.1.1); digest compiled into the firmware by scripts/gen_fpga_digests.py and checked by Core/Src/fpga_attest.c"
+          "value": "fpga-artefacts/openmotion-seed-fpga/0.1.1/seed_driver_impl1.jed (GitHub release asset of tag 0.1.1); digest computed by scripts/gen_fpga_digests.py into fpga_attest_expected.h; not checked by Core/Src/fpga_attest.c (EE and OPT only)"
         }
       ]
     },
@@ -364,7 +364,7 @@
         ]
       },
       "version": "1.1.0",
-      "description": "Console tapered-amplifier driver FPGA design, Lattice MachXO2-2000. Factory-programmed; attested at boot against the digest recorded here.",
+      "description": "Console tapered-amplifier driver FPGA design, Lattice MachXO2-2000. Factory-programmed. Not attested at runtime: fpga_attest.c checks the EE and OPT safety devices only (decision 2026-10-22) and reports the TA device as not checked; the digest recorded here is reference data.",
       "scope": "required",
       "licenses": [
         {
@@ -423,7 +423,7 @@
         },
         {
           "name": "openwater:evidence",
-          "value": "fpga-artefacts/openmotion-ta-fpga/1.1.0/TA_Driver_impl1.jed (GitHub release asset of tag 1.1.0); digest compiled into the firmware by scripts/gen_fpga_digests.py and checked by Core/Src/fpga_attest.c"
+          "value": "fpga-artefacts/openmotion-ta-fpga/1.1.0/TA_Driver_impl1.jed (GitHub release asset of tag 1.1.0); digest computed by scripts/gen_fpga_digests.py into fpga_attest_expected.h; not checked by Core/Src/fpga_attest.c (EE and OPT only)"
         }
       ]
     },
