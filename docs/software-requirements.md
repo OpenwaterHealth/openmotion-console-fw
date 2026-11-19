@@ -108,6 +108,8 @@ The firmware runs on an STM32H743-based controller and coordinates:
 
 ### 6.4 FPGA Programming Command Set (OW_FPGA_PROG)
 
+FR-070 to FR-077 apply to Factory images only (build option `OW_FACTORY_PROGRAMMING`, CMake preset `Factory`). See FR-140 to FR-145 for every other image.
+
 - FR-070: The firmware shall support opening FPGA configuration interface in offline mode.
 - FR-071: The firmware shall support erase command with mode bitmap payload.
 - FR-072: The firmware shall support CFG/UFM address reset, single-page write, and single-page read.
@@ -137,12 +139,34 @@ The firmware runs on an STM32H743-based controller and coordinates:
 ### 6.7 Persistent Configuration
 
 - FR-130: The firmware shall persist motion configuration in internal flash with magic/version/sequence/CRC and JSON blob.
-- FR-131: On invalid persisted configuration (magic/version/CRC/termination), firmware shall restore defaults and persist them.
+- FR-131: On invalid persisted configuration (magic/version/CRC/termination) or an unmigratable record, firmware shall run on defaults in RAM, report it and refuse the trigger (CFW-03); the stored record is left for inspection.
 - FR-132: The firmware shall expose configuration as a wire format header plus JSON data for host read.
 - FR-133: The firmware shall accept both full wire payload and raw JSON payload for host write.
 - FR-134: The firmware shall increment sequence and recompute CRC on each committed configuration write.
-- FR-135: Configuration JSON keys matching known FPGA register names shall be scaled and written to mapped FPGA registers during apply.
-- FR-136: The TEC_TRIP JSON setting shall be translated to voltage threshold used by runtime TEC trip logic.
+- FR-135: Operational configuration keys shall be scaled, range-checked and written to their mapped FPGA registers during apply; safety and unknown keys shall be ignored and logged (FR-150 to FR-155).
+- FR-136: The TEC trip voltage threshold shall be derived from the compile-time SAFETY_TEC_TRIP_C (FR-150); Factory images may override it from the record within hard bounds.
+
+### 6.8 FPGA Programming Lock-out and Configuration Attestation (PTR-2026-1-5)
+
+- FR-140: A Release or Debug image shall contain no FPGA or UFM programming code; the release pipeline shall fail if the image contains any programming symbol.
+- FR-141: A Release or Debug image shall answer every OW_FPGA_PROG command with OW_ERROR and the data byte OW_CODE_NOT_SUPPORTED.
+- FR-142: After initialisation, and on OW_CMD_FPGA_ATTEST request outside a scan, the firmware shall read the configuration flash of each of the two safety MachXO2 devices (EE, OPT) in transparent mode, compute its SHA-256 and compare it with the digest compiled into the image from the released safety bitstream artefact; the seed and TA devices shall be reported as not checked.
+- FR-146: I2C1 (mux 0 and the FPGA configuration ports) shall run in fast mode (at most 400 kHz); the attestation of both safety devices shall complete within 10 s of its start.
+- FR-143: For each safety FPGA the firmware shall read the per-unit safety record from UFM pages 0-1 (the layout of the safety FPGA's UFM loader) and validate its magic, layout version, reserved bytes, checksum, pulse-width order and every limit against the compiled-in safety envelope.
+- FR-147: When the released safety bitstream contains the FPGA's UFM loader (SBOM property openwater:ufm-loader), the firmware shall also require the loader status register (0x31) to report the record applied (0x2F); the attested devices and this property shall be table-driven from the SBOM manifest.
+- FR-144: A digest mismatch, read failure, or a blank, invalid or out-of-envelope safety record (or a loader that did not apply it) shall set TRIG_INTERLOCK_FPGA_ATTEST, refuse trigger start (and configuration after a failed run), stop a running trigger, queue a fault message and be reported in the attestation and boot-information replies; the interlock shall persist until a run passes.
+- FR-145: The attestation shall not block command handling: it shall run from the main loop within a bounded bus-time budget per iteration.
+
+### 6.9 Firmware-owned Safety Parameters
+
+- FR-150: The safety envelope (bounds for every EE/OPT limit and operational setpoint, the TEC trip threshold, the laser-driver clamps) shall be compiled into the firmware image and in force from reset; no record shall be able to loosen it; the TEC trip threshold shall not depend on any record.
+- FR-151: The firmware shall write and read back the firmware-owned registers at boot, after every configuration write and after every completed attestation; a failure shall set TRIG_INTERLOCK_LIMITS.
+- FR-152: The EE/OPT limit registers shall be loaded from a valid per-unit safety record only; a device without a valid record shall receive no limit writes and the laser shall stay interlocked (FR-144).
+- FR-157: The ceilings of TA_CURRENT_DRV (EE drive-current limit) and TA_PULSE_WIDTH (smaller EE/OPT pulse-width upper limit) shall be lowered by the unit's safety record, and shall apply to host configuration writes, the stored-record apply and OW_CTRL_I2C_WR.
+- FR-153: The configuration record (schema v3) shall hold only allow-listed operational keys and the opaque calibration block; a host write naming a safety key, an unknown key, or an out-of-range value shall be refused with OW_CODE_CFG_SAFETY_KEY, OW_CODE_CFG_UNKNOWN_KEY or OW_CODE_CFG_RANGE and nothing shall be stored.
+- FR-154: A v1/v2 record shall be migrated at load by keeping in-range operational and opaque keys and dropping the others, or rejected as a whole; it shall never be half-applied.
+- FR-155: OW_CTRL_I2C_WR shall refuse writes to firmware-owned registers and accept writes to operational registers only within their ranges.
+- FR-156: Factory images may accept safety keys as overrides within the safety envelope (the TEC trip only downwards), shall announce themselves at boot, in the version string and in boot-info, and shall never be built for a release tag.
 
 ## 7. Error Handling Requirements
 

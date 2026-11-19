@@ -66,9 +66,11 @@ ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
  *   Usable length : 512 KB - 0x400 = 511 KB
  * Persistent data still lives at fixed absolute addresses, well outside the
  * code region and untouched by the bootloader's slot (it never erases them):
- *   Sector 7 (@ 0x081E0000) — motion_config / calibration JSON
- *   Sector 6 (@ 0x081C0000) — odometer (system uptime + laser pulses)
- * See the bootloader's Core/Inc/memory_map.h for the full flash map. */
+ *   Sector 15 (@ 0x081E0000) — motion_config / calibration JSON
+ * The anti-rollback floor (sector 5 @ 0x080A0000, directly above the slot)
+ * belongs to the bootloader; LENGTH must not reach it. The odometer is in
+ * the external EEPROM, not internal flash.
+ * See Core/Inc/memory_map.h (mirrors the bootloader's) for the full map. */
 FLASH (rx)      : ORIGIN = 0x08020400, LENGTH = 511K
 }
 

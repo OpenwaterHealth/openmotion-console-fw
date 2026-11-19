@@ -10,6 +10,8 @@
 #include "usb_events.h"
 #include "odometer.h"
 #include "led_driver.h"
+#include "motion_config.h"
+#include "fpga_attest.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -28,6 +30,10 @@ volatile uint8_t _safety_trigger_interlock = 0;
  * is torn down so clearing a fault can't refire the laser. Separate from
  * _safety_trigger_interlock (the TEC thermal path, which auto-recovers). */
 volatile uint8_t _laser_safety_interlock = 0;
+/* Laser-safety status unknown (CFW-04): the EE or OPT safety FPGA STATUS
+ * could not be read for several polls in a row. Stops the trigger and blocks
+ * Trigger_Start until both read again and show no fault. */
+volatile uint8_t _laser_safety_unknown = 0;
 
 volatile uint32_t fsync_counter = 0;
 volatile uint32_t lsync_counter = 0;
@@ -90,6 +96,14 @@ static int jsonToTriggerConfigData(const char *jsonString, Trigger_Config_t* new
     }
 
     for (i = 1; i < r; i++) {
+        /* Every recognised key reads its value from t[i + 1]. A JSON object whose
+         * last token is a recognised key would otherwise read one token past the
+         * parsed set (uninitialised stack, or past the end of t[] when all 32 are
+         * used) and use it as an offset into the input (CVA O8 / R7). The input
+         * arrives over USB from the host. */
+        if (i + 1 >= r) {
+            break;
+        }
         if (jsoneq(jsonString, &t[i], "TriggerFrequencyHz") == 0) {
             newConfig->frequencyHz = strtof(jsonString + t[i + 1].start, NULL);
             i++;
@@ -165,11 +179,21 @@ static void updateTimerDataFromPeripheral()
 	 trigger_config.TriggerStatus = TIM_CHANNEL_STATE_GET(&FSYNC_TIMER, FSYNC_TIMER_CHAN);
 }
 
+/* Host-loss finish work deferred from the USB interrupt (CFW-11). */
+static volatile bool s_host_loss_pending = false;
+
+static void trigger_stop_outputs(void);
+
+/* USB DISCONNECT / PORT_CLOSE: runs in the USB interrupt (and from
+ * usb_recovery_task). Only latches the interlock and stops the outputs, which
+ * is register and GPIO work; the odometer update (I2C EEPROM write, printf)
+ * and the LED run from Trigger_Service() in the main loop (CFW-11). */
 static void trigger_usb_disconnect_cb(usb_event_t event)
 {
     (void)event;
     _usb_trigger_interlock = 1;
-    Trigger_Stop();
+    trigger_stop_outputs();
+    s_host_loss_pending = true;
 }
 
 static void trigger_usb_connect_cb(usb_event_t event)
@@ -214,25 +238,74 @@ void Trigger_LaserSafety_Clear(void)
     _laser_safety_interlock = 0;
 }
 
+void Trigger_LaserSafety_SetUnknown(bool unknown)
+{
+    _laser_safety_unknown = unknown ? 1U : 0U;
+    if (unknown) {
+        Trigger_Stop();
+    }
+}
+
+/* Check a configuration against the operating limits before anything is
+ * changed. Returns the FSYNC period in 1 us ticks through *arr_out. */
+static HAL_StatusTypeDef trigger_validate(const Trigger_Config_t *config, uint32_t *arr_out)
+{
+    /* Written so that NaN fails both comparisons. */
+    if (!(config->frequencyHz >= TRIGGER_FREQ_MIN_HZ && config->frequencyHz <= TRIGGER_FREQ_MAX_HZ)) {
+        return HAL_ERROR;
+    }
+    uint32_t arr_ticks = (uint32_t)(1000000.0f / config->frequencyHz + 0.5f); // period in us
+
+    if (config->triggerPulseWidthUsec == 0U || config->triggerPulseWidthUsec >= arr_ticks) {
+        return HAL_ERROR;
+    }
+    if (config->laserPulseWidthUsec < TRIGGER_LASER_WIDTH_MIN_US ||
+        config->laserPulseWidthUsec > TRIGGER_LASER_WIDTH_MAX_US) {
+        return HAL_ERROR;
+    }
+    /* The long (dark) laser slot is delay + width + skip delay; it must end
+     * inside the frame. 64-bit sum so large host values cannot wrap. */
+    uint64_t long_slot = (uint64_t)config->laserPulseDelayUsec
+                       + (uint64_t)config->laserPulseWidthUsec
+                       + (uint64_t)config->LaserPulseSkipDelayUsec;
+    if (long_slot >= arr_ticks) {
+        return HAL_ERROR;
+    }
+    *arr_out = arr_ticks;
+    return HAL_OK;
+}
+
 HAL_StatusTypeDef Trigger_SetConfig(const Trigger_Config_t *config) {
     if (config == NULL) {
         return HAL_ERROR; // Null pointer guard
     }
 
-    // Add range checks for the configuration parameters
-    if (config->frequencyHz < 1.0f || config->triggerPulseWidthUsec == 0 || config->frequencyHz > 100.0f) {
-        return HAL_ERROR; // Invalid configuration values
+    /* Validate everything first: a rejected configuration leaves the running
+     * trigger and the previous configuration untouched. */
+    uint32_t arr_ticks;
+    if (trigger_validate(config, &arr_ticks) != HAL_OK) {
+        return HAL_ERROR;
+    }
+    /* A failed FPGA attestation refuses a new configuration as well as a
+     * start (fpga_attest.h); a check still pending does not. */
+    if (fpga_attest_failed()) {
+        printf("Trigger_SetConfig refused: FPGA attestation failed\r\n");
+        return HAL_ERROR;
     }
 
-	if(trigger_config.TriggerStatus == HAL_TIM_CHANNEL_STATE_BUSY)
+    /* A running trigger is stopped before the timers are reprogrammed. Use the
+     * timer's own state: trigger_config.TriggerStatus is a host-supplied field. */
+	if(TIM_CHANNEL_STATE_GET(&FSYNC_TIMER, FSYNC_TIMER_CHAN) == HAL_TIM_CHANNEL_STATE_BUSY)
 	{
 		// stop timer pwm
 		HAL_TIM_OC_Stop_IT(&FSYNC_TIMER, FSYNC_TIMER_CHAN);
 
-		trigger_config.TriggerStatus = HAL_TIM_CHANNEL_STATE_READY;
-
 		HAL_GPIO_WritePin(enSyncOUT_GPIO_Port, enSyncOUT_Pin, GPIO_PIN_SET); // disable fsync output
 		HAL_GPIO_WritePin(nTRIG_GPIO_Port, nTRIG_Pin, GPIO_PIN_SET); // disable TA Trigger to fpga
+
+		/* Close the scan before the pulse counters are reset below. */
+		Odometer_Scan_Finish();
+		LED_Indicator_Set(LED_GREEN); // idle
 	}
 
     // Reset the counters on SetConfig
@@ -244,12 +317,7 @@ HAL_StatusTypeDef Trigger_SetConfig(const Trigger_Config_t *config) {
     uint32_t fsync_prescaler = 119; // (e.g., 120MHz / (119+1) = 1 MHz)
     FSYNC_TIMER.Instance->PSC = fsync_prescaler;
 
-    // Calculate ARR and CCR1
-    uint32_t arr_ticks = (uint32_t)(1000000.0f / config->frequencyHz + 0.5f); // period in µs, rounded to nearest tick
-    if (config->triggerPulseWidthUsec >= arr_ticks) {
-        return HAL_ERROR; // Pulse width too long
-    }
-
+    // ARR and CCR1 (arr_ticks: period in us, from trigger_validate)
     FSYNC_TIMER.Instance->ARR = arr_ticks - 1;
     FSYNC_TIMER.Instance->CCR1 = config->triggerPulseWidthUsec;
 
@@ -287,8 +355,69 @@ HAL_StatusTypeDef Trigger_SetConfig(const Trigger_Config_t *config) {
 }
 
 
+/* Fatal-error stop (CFW-01, ARCH-82): de-assert the sync-output and TA-trigger
+ * enables and drive both timer outputs to their inactive level, with direct
+ * register writes only. Safe with interrupts disabled and from a fault
+ * handler: no HAL calls, no SysTick, no callbacks, no printf. Unlike
+ * Trigger_Stop() it does not defer the FSYNC stop to the timer ISR and does
+ * not touch the odometer or the LED. */
+void Trigger_EmergencyStop(void)
+{
+    enSyncOUT_GPIO_Port->BSRR = enSyncOUT_Pin;  /* high = fsync output disabled */
+    nTRIG_GPIO_Port->BSRR = nTRIG_Pin;          /* high = TA trigger to FPGA disabled */
+
+    TIM_TypeDef *const timers[2] = { FSYNC_TIMER.Instance, LASER_TIMER.Instance };
+    for (unsigned int i = 0U; i < 2U; i++) {
+        TIM_TypeDef *t = timers[i];
+        if (t == NULL) {
+            continue;  /* not initialised yet: its output was never enabled */
+        }
+        t->DIER = 0U;
+        t->CR1 &= ~TIM_CR1_CEN;
+        /* OC1M = forced inactive: the pin goes to its idle level at once,
+         * whatever the channel polarity (FSYNC is active high, LSYNC low). */
+        t->CCMR1 = (t->CCMR1 & ~TIM_CCMR1_OC1M) | TIM_OCMODE_FORCED_INACTIVE;
+    }
+}
+
+uint8_t Trigger_GetInterlocks(void)
+{
+    uint8_t m = 0U;
+    if (_usb_trigger_interlock)    { m |= TRIG_INTERLOCK_HOST_LOSS; }
+    if (_laser_safety_interlock)   { m |= TRIG_INTERLOCK_LASER_SAFETY; }
+    if (_laser_safety_unknown)     { m |= TRIG_INTERLOCK_SAFETY_UNKNOWN; }
+    if (motion_cfg_limits_fault()) { m |= TRIG_INTERLOCK_LIMITS; }
+    if (_safety_trigger_interlock) { m |= TRIG_INTERLOCK_TEC; }
+    if (motion_cfg_is_defaulted()) { m |= TRIG_INTERLOCK_CONFIG; }
+    if (fpga_attest_interlocked()) { m |= TRIG_INTERLOCK_FPGA_ATTEST; }
+    return m;
+}
+
+/* True while the FSYNC timer runs (the trigger is started). Uses the timer's
+ * own state, not the host-supplied TriggerStatus field. */
+bool Trigger_IsRunning(void)
+{
+    return TIM_CHANNEL_STATE_GET(&FSYNC_TIMER, FSYNC_TIMER_CHAN) == HAL_TIM_CHANNEL_STATE_BUSY;
+}
+
 HAL_StatusTypeDef Trigger_Start() {
-    if(_usb_trigger_interlock || _laser_safety_interlock){
+    Trigger_Service(); /* finish a pending host-loss stop first (CFW-11) */
+
+    /* Every interlock that stops the trigger also refuses a restart while it
+     * is set: host loss, the EE/OPT laser-safety latch, and the TEC thermal
+     * trip (_safety_trigger_interlock, cleared by tec_trip_evaluate after 200
+     * clean polls). Without the TEC check a host could restart the laser
+     * during a thermal trip and it ran until the next telemetry poll.
+     * The console also refuses while it runs on default config because no
+     * valid stored record was found (CFW-03): its per-unit safety limits
+     * and TEC trip are not in effect. An unreadable safety FPGA status is
+     * treated as a fault too (CFW-04), and so is a safety limit from the
+     * config that was not loaded and verified (CFW-10), and an FPGA
+     * configuration that has not yet been attested against the released
+     * bitstreams, or failed that check (fpga_attest.h). */
+    if(_usb_trigger_interlock || _laser_safety_interlock || _laser_safety_unknown ||
+       _safety_trigger_interlock || motion_cfg_is_defaulted() || motion_cfg_limits_fault() ||
+       fpga_attest_interlocked()){
         return HAL_ERROR;
     }
 
@@ -315,15 +444,33 @@ HAL_StatusTypeDef Trigger_Start() {
 	__HAL_TIM_CLEAR_FLAG(&LASER_TIMER, TIM_FLAG_UPDATE);
 	__HAL_TIM_ENABLE_IT(&LASER_TIMER, TIM_IT_UPDATE);
 	if(HAL_TIM_OC_Start_IT(&FSYNC_TIMER, FSYNC_TIMER_CHAN) != HAL_OK) {
-        return HAL_ERROR; // Handle error
+        /* Undo the partial start: de-assert the outputs and close the scan. */
+        (void)Trigger_Stop();
+        return HAL_ERROR;
 	}
 
-	LED_RGB_SET(LED_BLUE); // trigger/laser active
+	LED_Indicator_Set(LED_BLUE); // trigger/laser active
     return HAL_OK;
 }
 
-HAL_StatusTypeDef Trigger_Stop() {
+/* Main-loop work after a host loss: finish the odometer scan and show idle.
+ * Called at the top of every main-loop iteration (before commands are
+ * processed) and at the start of Trigger_Start(), so a scan's odometer update
+ * always lands before the next scan starts. */
+void Trigger_Service(void)
+{
+    if (!s_host_loss_pending) {
+        return;
+    }
+    s_host_loss_pending = false;
+    Odometer_Scan_Finish();
+    LED_Indicator_Set(LED_GREEN); // idle
+}
 
+/* Stop the trigger outputs: interrupt-safe (timer registers and GPIO only, no
+ * bus traffic, no printf). */
+static void trigger_stop_outputs(void)
+{
     // If already stopped, clear any pending stop request so next start isn't cut short
     if (TIM_CHANNEL_STATE_GET(&FSYNC_TIMER, FSYNC_TIMER_CHAN) != HAL_TIM_CHANNEL_STATE_BUSY) {
         fsync_disable_flag = false;
@@ -337,6 +484,10 @@ HAL_StatusTypeDef Trigger_Stop() {
 
 	HAL_GPIO_WritePin(enSyncOUT_GPIO_Port, enSyncOUT_Pin, GPIO_PIN_SET); // disable fsync output
 	HAL_GPIO_WritePin(nTRIG_GPIO_Port, nTRIG_Pin, GPIO_PIN_SET); // disable TA Trigger to fpga
+}
+
+HAL_StatusTypeDef Trigger_Stop() {
+    trigger_stop_outputs();
 
 	/* Update laser odometer at scan finish */
 	Odometer_Scan_Finish();
@@ -344,28 +495,39 @@ HAL_StatusTypeDef Trigger_Stop() {
 	/* Return the indicator to idle on EVERY stop path — STOP_TRIG command,
 	 * USB disconnect, host VCP close (PORT_CLOSE), and the TEC safety trip —
 	 * so the console shows idle (green) whenever the laser is actually
-	 * stopped. LED_RGB_SET is pure GPIO, safe from the USB ISR context. */
-	LED_RGB_SET(LED_GREEN); // idle
+	 * stopped. Pure GPIO, safe from the USB ISR context. Not applied while a
+	 * laser-safety fault is latched: the trip stops the trigger on every
+	 * telemetry poll, and an idle green here would mask the fault blink. */
+	LED_Indicator_Set(LED_GREEN); // idle
     return HAL_OK;
 }
 
 
 HAL_StatusTypeDef Trigger_SetConfigFromJSON(const char *jsonString, size_t str_len)
 {
-	uint8_t tempArr[255] = {0};
+	/* Static, off the stack, with headroom: the SDK's default trigger JSON is
+	 * already ~245 bytes. Main-loop use only. */
+	static uint8_t tempArr[TRIGGER_JSON_MAX + 1U];
 	bool ret = HAL_OK;
+
+	/* str_len comes from the host packet: bound it before the copy and keep
+	 * room for the NUL that jsmn and strtoul rely on. */
+	if (jsonString == NULL || str_len == 0U || str_len > TRIGGER_JSON_MAX) {
+		return HAL_ERROR;
+	}
 
 	// Seed from current config so any field absent from JSON keeps its current value
 	Trigger_Config_t new_config = trigger_config;
     // Copy the JSON string to tempArr
     memcpy((char *)tempArr, jsonString, str_len);
+    tempArr[str_len] = '\0';
     // printf("Trigger_SetConfigFromJSON: %s\r\n", (char *)tempArr);
 
 	if (jsonToTriggerConfigData((const char *)tempArr, &new_config) == 0)
 	{
         Trigger_PrintConfig((const Trigger_Config_t*)&new_config);
-		Trigger_SetConfig(&new_config);
-		ret = HAL_OK;
+		/* A rejected configuration is reported to the host (CFW-05/06). */
+		ret = Trigger_SetConfig(&new_config);
 	}
 	else{
 		ret = HAL_ERROR;

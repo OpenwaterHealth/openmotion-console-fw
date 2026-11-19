@@ -3,6 +3,34 @@
  *
  *  Created on: Mar 4, 2024
  *      Author: gvigelet
+ *
+ *  STM32H743 internal flash: 2 MB = 2 banks x 1 MB, 16 sectors x 128 KB.
+ *  The flash map is owned by the console bootloader (open-motion-console-bl,
+ *  Core/Inc/memory_map.h). The MEM_* values below mirror it and must be kept
+ *  in sync with it.
+ *
+ *   Addr range              Size   Sector         Region             Owner
+ *  ---------------------------------------------------------------------------
+ *  0x08000000-0x0801FFFF    128K   0  (B1 S0)     BOOTLOADER         bootloader
+ *  0x08020000-0x0809FFFF    512K   1-4 (B1 S1-4)  APP SLOT           this image
+ *  0x080A0000-0x080BFFFF    128K   5  (B1 S5)     ANTI-ROLLBACK FLOOR bootloader
+ *  0x080C0000-0x0819FFFF    896K   6-12           RESERVED           -
+ *  0x081A0000-0x081DFFFF    256K   13-14 (B2 S5-6) APPLICATION-OWNED application
+ *  0x081E0000-0x081FFFFF    128K   15 (B2 S7)     USER CONFIG        application
+ *  ---------------------------------------------------------------------------
+ *
+ *  The slot build (STM32H743XX_FLASH.ld) runs at MEM_APP_RUN_ADDRESS and must
+ *  end at MEM_SLOT1_END. The application writes only USER CONFIG (motion_config).
+ *  It must never write the bootloader or the anti-rollback floor. The console
+ *  does not use the APPLICATION-OWNED sectors (the sensor keeps its camera FPGA
+ *  bitstream there); the odometer lives in the external EEPROM (odometer.h),
+ *  not in internal flash.
+ *
+ *  The bare-metal build (STM32H743XX_FLASH_BARE.ld) runs at 0x08000000 with no
+ *  bootloader, so the bootloader regions do not exist for it.
+ *
+ *  Sector names below are per bank (ADDR_FLASH_SECTOR_n_BANKm, n = 0-7); the
+ *  bootloader numbers sectors 0-15 across both banks.
  */
 
 #ifndef INC_MEMORY_MAP_H_
@@ -37,19 +65,53 @@
 
 #define ADDR_FLASH_END_ADDRESS     ((uint32_t)0x08200000)
 
-/* Reserved persistent-data sectors. Each persists via full-sector erase
- * (the STM32H7 flash sector is 128 KB and that is the minimum erase
- * granularity), so distinct tenants need distinct sectors. The linker script
- * reserves these by capping FLASH at 1792 KB.
- *
- * NOTE: Sector 6 / bank 2 (0x081C0000) is OWNED BY THE BOOTLOADER as the
- * anti-rollback version floor (openmotion-bl: SBSFU/Target/Src/anti_rollback.c)
- * and is protected from the DFU update path. The application MUST NOT write it.
- * The odometer lives in the external EEPROM (see odometer.h), so the
- * FLASH_ODOMETER_START_ADDR define below is legacy/unused — do not repurpose
- * sector 6 for flash storage without coordinating with the bootloader. */
+/* ── Bootloader flash map (mirrors open-motion-console-bl memory_map.h) ───── */
+#define MEM_SECTOR_SIZE           (0x00020000UL)   /* 128 KB per sector           */
+
+/* Bootloader (sector 0). Not present in the bare-metal build. */
+#define MEM_BOOTLOADER_BASE       (0x08000000UL)
+#define MEM_BOOTLOADER_SIZE       (0x00020000UL)   /* 128 KB                      */
+
+/* Active application slot (sectors 1-4). The only DFU-writable region. */
+#define MEM_SLOT1_BASE            (0x08020000UL)
+#define MEM_SLOT1_SIZE            (0x00080000UL)   /* 512 KB                      */
+#define MEM_SLOT1_END             (MEM_SLOT1_BASE + MEM_SLOT1_SIZE) /* 0x080A0000 */
+
+/* Signed-image header at the start of the slot; the image runs after it.
+   Must match SFU_IMG_IMAGE_OFFSET in the bootloader, the slot linker script
+   (STM32H743XX_FLASH.ld) and VECT_TAB_BASE_ADDRESS in system_stm32h7xx.c. */
+#define MEM_APP_IMAGE_OFFSET      (0x00000400UL)   /* 1 KB                        */
+#define MEM_APP_RUN_ADDRESS       (MEM_SLOT1_BASE + MEM_APP_IMAGE_OFFSET) /* 0x08020400 */
+
+/* Anti-rollback floor (sector 5). Erased and rewritten by the bootloader only;
+   the application must never write it. */
+#define MEM_ANTIROLLBACK_BASE     (0x080A0000UL)
+#define MEM_ANTIROLLBACK_SIZE     (0x00020000UL)   /* 128 KB                      */
+
+/* Reserved for future bootloader use (sectors 6-12). */
+#define MEM_RESERVED_BASE         (0x080C0000UL)
+#define MEM_RESERVED_SIZE         (0x000E0000UL)   /* 896 KB                      */
+
+/* Application-owned (sectors 13-14). The bootloader never touches it; unused
+   on the console. */
+#define MEM_APP_OWNED_BASE        (0x081A0000UL)
+#define MEM_APP_OWNED_SIZE        (0x00040000UL)   /* 256 KB                      */
+
+/* User configuration (sector 15): motion_config / calibration JSON.
+   Read-only over DFU; written by the application. */
+#define MEM_USER_CONFIG_BASE      (0x081E0000UL)
+#define MEM_USER_CONFIG_SIZE      (0x00020000UL)   /* 128 KB                      */
+
+/* Persistent data in internal flash. Each tenant needs a whole 128 KB sector
+ * (the minimum erase granularity). */
 #define FLASH_USER_START_ADDR     ADDR_FLASH_SECTOR_7_BANK2  /* motion_config / calibration */
-#define FLASH_ODOMETER_START_ADDR ADDR_FLASH_SECTOR_6_BANK2  /* RESERVED: bootloader anti-rollback floor — do not use */
+
+#ifndef __cplusplus
+_Static_assert(ADDR_FLASH_SECTOR_7_BANK2 == MEM_USER_CONFIG_BASE,
+               "user config sector disagrees with the bootloader flash map");
+_Static_assert(ADDR_FLASH_SECTOR_5_BANK1 == MEM_ANTIROLLBACK_BASE,
+               "anti-rollback floor disagrees with the bootloader flash map");
+#endif
 
 #ifdef __cplusplus
 }

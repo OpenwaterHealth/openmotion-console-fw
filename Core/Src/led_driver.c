@@ -10,6 +10,10 @@
 
 
 static uint8_t rgb_state = 0;
+/* Set while a laser-safety fault is latched. Read from the USB ISR context
+ * (Trigger_Stop on disconnect / port close), hence volatile. */
+static volatile bool s_fault_active = false;
+static uint32_t s_fault_since_ms = 0;
 
 // Initialize the LEDs
 void LED_Init(void)
@@ -47,6 +51,35 @@ void LED_RGB_SET(uint8_t rgbState)
 uint8_t LED_RGB_GET(void)
 {
 	return rgb_state;
+}
+
+void LED_Indicator_Set(uint8_t rgbState)
+{
+	if (s_fault_active) {
+		return; /* latched laser-safety fault owns the indicator */
+	}
+	LED_RGB_SET(rgbState);
+}
+
+void LED_Fault_Indicate(bool fault_latched, uint32_t now_ms)
+{
+	if (fault_latched) {
+		if (!s_fault_active) {
+			s_fault_since_ms = now_ms; /* first blue edge now */
+			s_fault_active = true;
+		}
+		/* Unsigned subtraction stays correct across HAL tick wraparound. */
+		uint32_t phase = ((now_ms - s_fault_since_ms) / LED_FAULT_BLINK_HALF_PERIOD_MS) & 1U;
+		uint8_t want = (phase == 0U) ? LED_BLUE : LED_NONE;
+		if (want != rgb_state) {
+			LED_RGB_SET(want);
+		}
+	} else if (s_fault_active) {
+		/* Latch cleared. The trip stopped the trigger and Trigger_Start is
+		 * refused while latched, so the console is idle. */
+		s_fault_active = false;
+		LED_RGB_SET(LED_GREEN);
+	}
 }
 
 // Set the state of an LED (ON/OFF)

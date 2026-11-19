@@ -43,9 +43,9 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
 /* Specify the memory areas */
 MEMORY
 {
-  /* Reserve the last two 128KB sectors of Bank 2 for persistent data:
+  /* Keep the last two 128KB sectors of Bank 2 out of the image:
    *   Sector 7 (@ 0x081E0000) — motion_config / calibration JSON
-   *   Sector 6 (@ 0x081C0000) — odometer (system uptime + laser pulses)
+   *   Sector 6 (@ 0x081C0000) — unused (the odometer is in the external EEPROM)
    * Each persists via full-sector erase, so they cannot co-tenant a sector.
    * Trimming code to 1792 KB still leaves >10x headroom for current build. */
   FLASH (rx)     : ORIGIN = 0x08000000, LENGTH = 1792K

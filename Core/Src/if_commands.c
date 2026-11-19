@@ -13,6 +13,7 @@
 #include "tca9548a.h"
 #include "console_i2c_health.h"
 #include "trigger.h"
+#include "fpga_register_map.h"
 #include "fan_driver.h"
 #include "ads7828.h"
 #include "ad5761r.h"
@@ -25,6 +26,7 @@
 #include "odometer.h"
 #include "console_serial.h"
 #include "logging.h"
+#include "fpga_attest.h"
 
 #include <string.h>
 
@@ -114,7 +116,10 @@ static uint16_t fan_measure_rpm(uint8_t index)
         rpm = 0xFFFFU;
     return (uint16_t)rpm;
 }
-static uint32_t id_words[3] = {0};
+/* OW_CMD_HWID reply: 96-bit UID in words 0-2, word 3 is constant zero
+ * padding. The reply is 16 bytes, so the array must be too — a 3-word
+ * array leaked the adjacent static into bytes 12-15 (#53). */
+static uint32_t id_words[4] = {0};
 
 /* OW_CMD_BOOT_INFO reply. Reports the RUNTIME vector-table base (SCB->VTOR),
  * not the compile-time BARE_METAL_BUILD flag, so the device evidences where it
@@ -123,10 +128,17 @@ static uint32_t id_words[3] = {0};
  * byte-identical to the sensor's reply (openmotion-sensor-fw #110) so one host
  * parser covers both boards. */
 typedef struct __attribute__((packed)) {
-	uint8_t  struct_version;   /* 1 */
+	uint8_t  struct_version;   /* 2 */
 	uint8_t  reserved[3];
 	uint32_t vtor;             /* SCB->VTOR */
 	uint32_t flash_base;       /* image link base */
+	/* v2 (appended; a v1 parser ignores them): the safety state the
+	 * application shows. interlocks = Trigger_GetInterlocks() bits;
+	 * fpga_attest = fpga_attest_state_t; build = bit0 factory image. */
+	uint8_t  interlocks;
+	uint8_t  fpga_attest;
+	uint8_t  build;
+	uint8_t  reserved2;
 } boot_info_t;
 static boot_info_t boot_info = {0};
 
@@ -147,6 +159,37 @@ static float temp_val = 0;
 extern volatile bool _trip_set;
 extern volatile bool _tec_sample_lock;
 extern volatile TecStats last_tec_stats;
+
+/* OW_CTRL_I2C_WR: data = mux, channel, i2c addr, register, length, bytes.
+ * The length byte must match the bytes actually sent (NEW-4), and writes to
+ * the laser and safety FPGAs go through the register-map filter (CFW-08).
+ * A refused write returns OW_ERROR with nothing written. */
+static void handle_i2c_write(const UartPacket *cmd, UartPacket *uartResp)
+{
+    const char *why = NULL;
+
+    if (cmd->data_len < 6U || cmd->data[4] != (uint8_t)(cmd->data_len - 5U) ||
+        cmd->data_len - 5U > 255U) {
+        why = "length byte does not match the payload";
+    } else {
+        why = fpga_passthrough_write_problem(cmd->data[0], cmd->data[1], cmd->data[2],
+                                             cmd->data[3], cmd->data[4], &cmd->data[5],
+                                             Trigger_IsRunning());
+    }
+    if (why == NULL &&
+        TCA9548A_Write_Data(cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3],
+                            cmd->data[4], &cmd->data[5]) != TCA9548A_OK) {
+        why = "I2C write failed";
+    }
+    if (why != NULL) {
+        printf("I2C_WR refused (mux %u ch %u addr 0x%02X reg 0x%02X): %s\r\n",
+               cmd->data_len > 0U ? cmd->data[0] : 0U, cmd->data_len > 1U ? cmd->data[1] : 0U,
+               cmd->data_len > 2U ? cmd->data[2] : 0U, cmd->data_len > 3U ? cmd->data[3] : 0U, why);
+        uartResp->packet_type = OW_ERROR;
+        uartResp->data_len = 0;
+        uartResp->data = NULL;
+    }
+}
 
 static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
 {
@@ -200,7 +243,9 @@ static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
         }
         else
         {
-            LED_RGB_SET(cmd->reserved);
+            /* Acknowledged but not applied while a laser-safety fault is
+             * latched: the fault blink owns the LED until the latch clears. */
+            LED_Indicator_Set(cmd->reserved);
         }
         break;
     case OW_CTRL_GET_IND:
@@ -271,31 +316,7 @@ static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
         break;
     case OW_CTRL_I2C_WR:
         uartResp->command = OW_CTRL_I2C_WR;
-        if (cmd->data_len < 5)
-        {
-            uartResp->packet_type = OW_ERROR;
-            uartResp->data_len = 0;
-            uartResp->data = NULL;
-        }
-        else
-        {
-            uint8_t mux_index = cmd->data[0];
-            uint8_t channel = cmd->data[1];
-            uint8_t i2c_addr = cmd->data[2];
-            uint8_t reg_addr = cmd->data[3];
-            uint8_t data_len = cmd->data[4];
-            uint8_t *pData = &cmd->data[5];
-            // printf("I2C Write MUX: %d CH: %d ADDR: 0x%02X REG: 0x%02X LEN: %d ", mux_index, channel, i2c_addr, reg_addr, data_len);
-            // printBufferAsArr(pData, data_len);
-            int8_t tca_ret = TCA9548A_Write_Data(mux_index, channel, i2c_addr, reg_addr, data_len, pData);
-            if (tca_ret != TCA9548A_OK)
-            {
-                printf("error selecting channel\r\n");
-                uartResp->packet_type = OW_ERROR;
-                uartResp->data_len = 0;
-                uartResp->data = NULL;
-            }
-        }
+        handle_i2c_write(cmd, uartResp);
         break;
     case OW_CTRL_SET_TRIG:
         uartResp->command = OW_CTRL_SET_TRIG;
@@ -345,7 +366,19 @@ static _Bool process_controller_command(UartPacket *uartResp, UartPacket *cmd)
         uartResp->reserved = cmd->reserved;
         uartResp->data_len = 0;
 
-        Trigger_Start(); // sets the indicator blue on success
+        /* A refused start is an error to the host, with one status byte:
+         * the active TRIG_INTERLOCK_* bits, or TRIG_START_TIMER_FAILED. */
+        if (Trigger_Start() != HAL_OK) // sets the indicator blue on success
+        {
+            static uint8_t start_refusal;
+            start_refusal = Trigger_GetInterlocks();
+            if (start_refusal == 0U) {
+                start_refusal = TRIG_START_TIMER_FAILED;
+            }
+            uartResp->packet_type = OW_ERROR;
+            uartResp->data_len = 1;
+            uartResp->data = &start_refusal;
+        }
         break;
     case OW_CTRL_STOP_TRIG:
         uartResp->command = OW_CTRL_STOP_TRIG;
@@ -644,19 +677,28 @@ _Bool process_if_command(UartPacket *uartResp, UartPacket *cmd)
             id_words[0] = HAL_GetUIDw0();
             id_words[1] = HAL_GetUIDw1();
             id_words[2] = HAL_GetUIDw2();
-            uartResp->data_len = 16;
+            id_words[3] = 0u;
+            uartResp->data_len = sizeof(id_words);
             uartResp->data = (uint8_t *)&id_words;
             break;
         case OW_CMD_BOOT_INFO:
             /* Runtime vector-table base classifies the boot mode; see the
              * boot_info_t comment. Host maps 0x08000000 -> bare-metal,
              * 0x08020400 -> bootloader slot. */
-            boot_info.struct_version = 1u;
+            boot_info.struct_version = 2u;
             boot_info.reserved[0] = 0u;
             boot_info.reserved[1] = 0u;
             boot_info.reserved[2] = 0u;
             boot_info.vtor       = SCB->VTOR;
             boot_info.flash_base = SCB->VTOR;
+            boot_info.interlocks = Trigger_GetInterlocks();
+            boot_info.fpga_attest = (uint8_t)fpga_attest_state();
+#if defined(OW_FACTORY_PROGRAMMING)
+            boot_info.build = 0x01u;
+#else
+            boot_info.build = 0x00u;
+#endif
+            boot_info.reserved2 = 0u;
             uartResp->data_len = sizeof(boot_info);
             uartResp->data = (uint8_t *)&boot_info;
             break;
@@ -759,12 +801,29 @@ _Bool process_if_command(UartPacket *uartResp, UartPacket *cmd)
                     break;
                 }
 
-                if (motion_cfg_wire_write(cmd->data, cmd->data_len) != HAL_OK)
                 {
-                    uartResp->packet_type = OW_ERROR;
-                    uartResp->data_len = 0;
-                    uartResp->data = NULL;
-                    break;
+                    /* A refused write answers OW_ERROR with one data byte
+                     * saying why (OW_CODE_*), so a host that sent a safety
+                     * key learns it is firmware-owned rather than seeing a
+                     * generic failure. Nothing is stored on refusal. */
+                    static uint8_t cfg_refusal;
+                    motion_cfg_result_t res = motion_cfg_wire_write(cmd->data, cmd->data_len);
+                    if (res != MOTION_CFG_OK)
+                    {
+                        switch (res) {
+                        case MOTION_CFG_ERR_SAFETY_KEY:  cfg_refusal = OW_CODE_CFG_SAFETY_KEY;  break;
+                        case MOTION_CFG_ERR_UNKNOWN_KEY: cfg_refusal = OW_CODE_CFG_UNKNOWN_KEY; break;
+                        case MOTION_CFG_ERR_RANGE:       cfg_refusal = OW_CODE_CFG_RANGE;       break;
+                        case MOTION_CFG_ERR_NOT_STRICT:
+                        case MOTION_CFG_ERR_TOO_LONG:
+                        case MOTION_CFG_ERR_PARAM:       cfg_refusal = OW_CODE_DATA_ERROR;      break;
+                        default:                         cfg_refusal = OW_CODE_ERROR;           break;
+                        }
+                        uartResp->packet_type = OW_ERROR;
+                        uartResp->data_len = 1;
+                        uartResp->data = &cfg_refusal;
+                        break;
+                    }
                 }
 
                 // Apply updated config to runtime variables.
@@ -843,6 +902,24 @@ _Bool process_if_command(UartPacket *uartResp, UartPacket *cmd)
                 uartResp->data = NULL;
             }
             break;
+        case OW_CMD_FPGA_ATTEST:
+            /* Read-only. reserved 1 starts a new run first (refused with
+             * OW_CODE_BUSY while a run or the trigger is active: the check
+             * never runs inside a scan). Either way the reply is the
+             * current report; the host polls until state != RUNNING. */
+            uartResp->command = OW_CMD_FPGA_ATTEST;
+            if (cmd->reserved == 1u && !fpga_attest_start())
+            {
+                static uint8_t attest_busy;
+                attest_busy = OW_CODE_BUSY;
+                uartResp->packet_type = OW_ERROR;
+                uartResp->data_len = 1;
+                uartResp->data = &attest_busy;
+                break;
+            }
+            uartResp->data_len = sizeof(fpga_attest_report_t);
+            uartResp->data = (uint8_t *)fpga_attest_report();
+            break;
         case OW_CMD_RESET:
             uartResp->command = cmd->command;
             uartResp->addr = cmd->addr;
@@ -891,8 +968,34 @@ _Bool process_if_command(UartPacket *uartResp, UartPacket *cmd)
     case OW_CONTROLLER:
         return process_controller_command(uartResp, cmd);
     case OW_FPGA_PROG:
+#if defined(OW_FACTORY_PROGRAMMING)
+        if (fpga_attest_running() || Trigger_IsRunning())
+        {
+            /* The attestation shares the configuration port; never program
+             * while it reads, and never while the laser can fire. */
+            static uint8_t prog_busy;
+            prog_busy = OW_CODE_BUSY;
+            uartResp->command = cmd->command;
+            uartResp->packet_type = OW_ERROR;
+            uartResp->data_len = 1;
+            uartResp->data = &prog_busy;
+            return true;
+        }
         return process_fpga_prog_command(uartResp, cmd);
+#else
+        {
+            /* Not available in a Release or Debug image: the programming
+             * paths are compiled out (if_fpga_prog.c, XO2_api.c, XO2_cmds.c).
+             * A defined refusal, never a silent success. */
+            static uint8_t prog_unsupported;
+            prog_unsupported = OW_CODE_NOT_SUPPORTED;
+            uartResp->command = cmd->command;
+            uartResp->packet_type = OW_ERROR;
+            uartResp->data_len = 1;
+            uartResp->data = &prog_unsupported;
+        }
         break;
+#endif
     default:
         uartResp->data_len = 0;
         uartResp->packet_type = OW_UNKNOWN;

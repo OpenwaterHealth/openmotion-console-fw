@@ -41,7 +41,7 @@ The firmware shall provide deterministic control, monitoring, and safety enforce
 - HL-CTRL-003: The firmware shall support runtime configuration updates from the host.
 - HL-CTRL-004: The firmware shall execute hardware control commands for I2C devices, fans, LEDs, and TEC subsystems.
 - HL-CTRL-005: The firmware shall support trigger configuration, activation, and deactivation.
-- HL-CTRL-006: The firmware shall support FPGA configuration, programming, and status monitoring workflows.
+- HL-CTRL-006: The firmware shall support FPGA status monitoring and configuration attestation; programming workflows exist in Factory images only.
 
 ---
 
@@ -72,6 +72,8 @@ The firmware shall provide deterministic control, monitoring, and safety enforce
 - HL-SAFE-003: The firmware shall disable triggering on safety violations or communication loss.
 - HL-SAFE-004: The firmware shall generate and queue system error notifications for fault events.
 - HL-SAFE-005: The firmware shall support recovery from fault conditions when safe operating criteria are restored.
+- HL-SAFE-006: The firmware shall verify at boot and on request that the configuration of every laser-driver and safety FPGA is the released design, and shall not allow the laser to be armed until it has; a shipped image shall contain no means of reprogramming those devices.
+- HL-SAFE-007: The laser-safety parameters (thermal trip, safety-monitor limits, driver clamps) shall be owned by the firmware image, in force from reset and not writable by the host; the host shall only set operational parameters within firmware-validated ranges.
 
 ---
 

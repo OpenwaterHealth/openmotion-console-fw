@@ -6,9 +6,8 @@
             "hidden": true,
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build/${presetName}",
-		    "toolchainFile": "${sourceDir}/cmake/gcc-arm-none-eabi.cmake",
-            "cacheVariables": {
-            }
+            "toolchainFile": "${sourceDir}/cmake/gcc-arm-none-eabi.cmake",
+            "cacheVariables": {}
         },
         {
             "name": "Debug",
@@ -39,6 +38,25 @@
                 "CMAKE_BUILD_TYPE": "Release",
                 "BARE_METAL": "ON"
             }
+        },
+        {
+            "name": "Factory",
+            "inherits": "default",
+            "displayName": "Factory (bench only: FPGA programming + safety overrides compiled in)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "OW_FACTORY_PROGRAMMING": "ON"
+            }
+        },
+        {
+            "name": "Factory-BareMetal",
+            "inherits": "default",
+            "displayName": "Factory bare-metal (bench only)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "OW_FACTORY_PROGRAMMING": "ON",
+                "BARE_METAL": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -57,6 +75,14 @@
         {
             "name": "Release-BareMetal",
             "configurePreset": "Release-BareMetal"
+        },
+        {
+            "name": "Factory",
+            "configurePreset": "Factory"
+        },
+        {
+            "name": "Factory-BareMetal",
+            "configurePreset": "Factory-BareMetal"
         }
     ]
 }

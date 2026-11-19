@@ -63,11 +63,14 @@ ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
 /* BARE-METAL image: flashed directly to the start of flash with NO bootloader.
  * The reset vector and code live at the device base (0x08000000), so on power-up
  * the STM32 boot ROM launches this image straight away.
- * Reserve the last two 128KB sectors of Bank 2 for persistent data:
+ * Code is capped at 1792 KB so the last two 128KB sectors of Bank 2 stay out
+ * of the image:
  *   Sector 7 (@ 0x081E0000) — motion_config / calibration JSON
- *   Sector 6 (@ 0x081C0000) — odometer (system uptime + laser pulses)
- * Each persists via full-sector erase, so they cannot co-tenant a sector.
- * Trimming code to 1792 KB still leaves >10x headroom for current build. */
+ *   Sector 6 (@ 0x081C0000) — unused (the odometer is in the external EEPROM)
+ * Persistent data is erased a full sector at a time, so it cannot share a
+ * sector with code. 1792 KB still leaves >10x headroom for current build.
+ * With no bootloader there is no slot or anti-rollback floor; see
+ * Core/Inc/memory_map.h for the bootloader flash map. */
 FLASH (rx)      : ORIGIN = 0x08000000, LENGTH = 1792K
 }
 

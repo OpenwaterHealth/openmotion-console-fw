@@ -150,6 +150,58 @@ Here are **structured test procedures** for representative and critical requirem
 
 ---
 
+### TP-FPGA-003: Attestation Positive Path
+**Maps to:** SR-ATTEST-002
+**Steps:**
+1. Power the console with a Release or Debug image; capture the debug UART.
+2. Poll OW_CMD_FPGA_ATTEST until state is PASS or FAIL.
+3. Read OW_CMD_BOOT_INFO.
+
+**Expected Result:**
+- Precondition: both safety devices provisioned with a safety record (fpga-attestation.md §6.4).
+- State PASS; EE and OPT: no fault bit, 3198 pages, digest equals expected, UFM valid (status bit 0x10); seed and TA: status 0x40 (not checked).
+- Both readbacks together complete within 10 s (about 3.2 s each at 400 kHz).
+- Boot-info interlock byte bit 0x40 clear; trigger start no longer refused for 0x40.
+
+---
+
+### TP-FPGA-005: Missing Safety Record
+**Maps to:** SR-ATTEST-002, SR-SAFEP-001
+**Steps:**
+1. On a unit whose EE or OPT UFM is blank (never provisioned), power the console with a Release image.
+2. Poll OW_CMD_FPGA_ATTEST until state is PASS or FAIL; read OW_CMD_BOOT_INFO; send OW_CTRL_START_TRIG.
+
+**Expected Result:**
+- EE and OPT digests equal expected; the unprovisioned device(s) report status bit 0x08 and ufm_status 0 (blank).
+- State FAIL, interlocked 1; boot-info attestation state 3, interlock bit 0x40 set.
+- OW_CTRL_START_TRIG refused with 0x40 in the status byte.
+- Debug UART: "Safety record: EE none, OPT none; ... the laser stays interlocked".
+
+---
+
+### TP-FPGA-004: Programming Refused
+**Maps to:** SR-ATTEST-001
+**Steps:**
+1. Send OW_FPGA_PROG opcodes 0x3F and 0x30 for channels 0..3.
+
+**Expected Result:**
+- Every reply is OW_ERROR with the single data byte 0xFB.
+
+---
+
+### TP-FPGA-005: Modified Bitstream (bench unit only)
+**Maps to:** SR-ATTEST-003
+**Steps:**
+1. Factory image: program one device with a bitstream differing from the release.
+2. Flash the Release image; wait for the attestation to finish.
+3. Send OW_CTRL_START_TRIG.
+
+**Expected Result:**
+- State FAIL with the device's digest bit set; start refused with 0x40 in the status byte; fault message queued.
+- Recovery per docs/fpga-attestation.md section 6.2 step 4 restores PASS.
+
+---
+
 ## Telemetry Procedures
 
 ### TP-TLM-001: Periodic Telemetry
@@ -254,6 +306,29 @@ Here are **structured test procedures** for representative and critical requirem
 **Expected Result:**
 - Defaults restored.
 - New valid config written.
+
+---
+
+### TP-CFG-003: Safety Key Rejected
+**Maps to:** SR-SAFEP-002
+**Steps:**
+1. Read the stored config (seq).
+2. Write `{"TEC_TRIP": 90}`, `{"EE_DRIVE_CL": 9999}`, `{"TA_CURRENT_DRV": 9000}`, `{"bogus": 1}`.
+3. Read the stored config again.
+
+**Expected Result:**
+- OW_ERROR with 0xFA, 0xFA, 0xF8, 0xF9 respectively; seq and text unchanged.
+
+---
+
+### TP-CFG-004: TEC Trip Independent of the Record
+**Maps to:** SR-SAFEP-001
+**Steps:**
+1. Write a non-strict config (`{"TA_CURRENT_DRV": NaN}`), then `{}`.
+2. Read OW_CTRL_TEC_STATUS and OW_CMD_BOOT_INFO.
+
+**Expected Result:**
+- First write refused, second accepted; TEC status evaluating (trip armed from the compile-time threshold); no defaults interlock.
 
 ---
 

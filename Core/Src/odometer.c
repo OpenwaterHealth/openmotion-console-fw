@@ -21,6 +21,13 @@ static SystemOdometer_t system_odo;
 static LaserOdometer_t laser_odo;
 static bool odometer_initialized = false;
 
+/* True only between Odometer_Scan_Start() and the first Odometer_Scan_Finish()
+ * that follows it. Trigger_Stop() runs on every stop path — STOP_TRIG, USB
+ * disconnect, host port close, safety trips — so Scan_Finish must be a no-op
+ * when no scan is in flight: the lsync counter isn't reset on stop, and a
+ * stale-counter delta would re-add the previous scan's pulses. */
+static bool scan_active = false;
+
 /* EEPROM device + ring cursor. s_slot is the index of the newest record on the
  * device (-1 until the first write). s_seq is that record's sequence number. */
 static eeprom_dev_t s_eeprom;
@@ -114,6 +121,7 @@ HAL_StatusTypeDef Odometer_Init(void)
     s_slot = -1;
     s_seq = 0;
     odometer_initialized = false;
+    scan_active = false;
 
     if (EEPROM_Init(&s_eeprom) != HAL_OK) {
         printf("Odometer: EEPROM not present — odometers disabled\r\n");
@@ -218,6 +226,7 @@ HAL_StatusTypeDef Odometer_Scan_Start(void)
         return HAL_ERROR;
     }
     laser_odo.scan_start_pulses = get_lsync_pulse_count();
+    scan_active = true;
     printf("Scan started, laser pulses at start: %lu\r\n",
            (unsigned long)laser_odo.scan_start_pulses);
     return HAL_OK;
@@ -232,6 +241,10 @@ HAL_StatusTypeDef Odometer_Scan_Finish(void)
     if (!odometer_initialized) {
         return HAL_ERROR;
     }
+    if (!scan_active) {
+        return HAL_OK;
+    }
+    scan_active = false;
 
     uint32_t current_pulses = get_lsync_pulse_count();
     uint32_t scan_pulses;

@@ -40,6 +40,15 @@
 #include "XO2_dev.h"
 #include "XO2_api.h"
 #include "XO2_cmds.h"
+#include "fpga_attest.h"
+#include "safety_envelope.h"
+#include "safety_ufm_record.h"
+#include "motion_cfg_keys.h"
+
+/* Bus time per main-loop iteration given to the FPGA attestation readback
+ * (about 5 configuration pages at 100 kHz). Keeps command latency and the
+ * 25 ms telemetry cadence within their budgets while the check runs. */
+#define FPGA_ATTEST_BUDGET_MS 12U
 #include "if_fpga_prog.h"
 #include "motion_config.h"
 #include "fpga_register_map.h"
@@ -163,6 +172,7 @@ static uint8_t I2C_scan(I2C_HandleTypeDef * pI2c, uint8_t* addr_list, size_t lis
     // Iterate through all possible 7-bit addresses
     for (uint8_t address = 0x00; address <= 0x7F; address++) {
         HAL_StatusTypeDef status;
+        watchdog_refresh(); /* up to 128 x 50 ms on a stuck bus */
         status = HAL_I2C_IsDeviceReady(pI2c, address << 1, 2, 50); // Address shift left by 1 for read/write bit
         if (status == HAL_OK) {
         	if(addr_list != NULL && found < list_size) {
@@ -245,64 +255,295 @@ void delay_ms(uint32_t ms)
     }
 }
 
+/* Refresh the independent watchdog (250 ms window, CFW-01). A no-op before
+ * MX_IWDG1_Init(). Call it only from bounded waits; Error_Handler() and the
+ * fault handlers must never refresh it. */
+void watchdog_refresh(void)
+{
+    if (hiwdg1.Instance != NULL) {
+        (void)HAL_IWDG_Refresh(&hiwdg1);
+    }
+}
+
+/* HAL_Delay() that keeps the watchdog refreshed, for the boot delays and the
+ * FPGA programming waits (XO2 erase takes seconds). */
+void delay_ms_wdg(uint32_t ms)
+{
+    uint32_t start = HAL_GetTick();
+
+    watchdog_refresh();
+    while ((HAL_GetTick() - start) < ms) {
+        HAL_Delay(1);
+        watchdog_refresh();
+    }
+}
+
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-/* Write one FPGA register from a parsed JSON key/value pair.
- * Returns true so the caller can unconditionally continue to the next key. */
-static bool apply_fpga_register_setting(const FpgaRegister *reg,
-                                        const char *keybuf,
-                                        const char *tmpval)
+/* ---- Safety parameters and the laser operating point --------------------
+ * (PTR-2026-1-5 host-writable safety state; CFW-10; SDD ARCH-125/ARCH-83)
+ *
+ * Two kinds of register load, in this order, at boot, after every host
+ * configuration write and after every completed FPGA attestation:
+ *
+ *   1. The SAFETY LOADS: the EE/OPT limit registers from the per-unit
+ *      safety record in each safety FPGA's UFM (safety_ufm_record.h, bounded
+ *      by safety_envelope.h), and the fixed TA / seed driver clamps of
+ *      safety_envelope.h. No host data takes part. A device without a valid
+ *      record gets no limit loads: its registers keep the design reset
+ *      values, and the attestation interlock keeps the laser off.
+ *   2. The OPERATIONAL point from the stored configuration record:
+ *      TA_CURRENT_DRV, TA_PULSE_WIDTH, SEED_CW_GAIN, SEED_DDS_GAIN, each
+ *      range-checked against the envelope; TA_PULSE_WIDTH is also lowered by
+ *      the unit's record (motion_cfg_set_unit_ceiling: the ceiling applies to host config
+ *      writes and to the I2C pass-through). Safety keys and unknown keys in
+ *      the record are ignored and logged (they cannot be stored by this
+ *      firmware; see motion_config.c).
+ *
+ * Every register is written and read back. Any failure is reported to the
+ * host and refuses Trigger_Start() (TRIG_INTERLOCK_LIMITS) until a later
+ * apply succeeds. The SDK used to write the same registers at connection
+ * through OW_CTRL_I2C_WR; in a Release build those writes are now refused
+ * for the safety-owned registers (fpga_register_map.c). */
+
+static bool     s_limits_fault;
+static unsigned s_limits_fail_count;
+static char     s_limits_first_fail[56];
+
+bool motion_cfg_limits_fault(void)
 {
-    if (reg->direction == FPGA_DIR_RD) {
-        printf("%s is read-only, skipping write\r\n", keybuf);
-        return true;
+    return s_limits_fault;
+}
+
+static void limits_fail(const char *key, const char *why)
+{
+    printf("ERROR: %s not applied: %s\r\n", key, why);
+    if (s_limits_fail_count == 0U) {
+        (void)snprintf(s_limits_first_fail, sizeof(s_limits_first_fail), "%s: %s", key, why);
     }
+    s_limits_fail_count++;
+    s_limits_fault = true;
+}
 
-    double val    = strtod(tmpval, NULL);
-    double scale  = (reg->scale != 0.0f) ? (double)reg->scale : 1.0;
-    double scaled = val / scale;
-    if (scaled < 0) { scaled = 0; }
+/* Write a register and read it back; NULL on success, else the reason. */
+static const char *fpga_write_verify(const FpgaRegister *reg, const uint8_t *data)
+{
+    uint8_t rb[4] = {0, 0, 0, 0};
 
-    uint32_t raw = (uint32_t)(scaled + 0.5);
+    if (TCA9548A_Write_Data(reg->muxIdx, reg->channel, reg->i2cAddr,
+                            reg->offset, reg->data_len, (uint8_t *)data) != TCA9548A_OK) {
+        return "write failed";
+    }
+    if (TCA9548A_Read_Data(reg->muxIdx, reg->channel, reg->i2cAddr,
+                           reg->offset, reg->data_len, rb) != TCA9548A_OK) {
+        return "read-back failed";
+    }
+    if (memcmp(rb, data, reg->data_len) != 0) {
+        return "read-back mismatch";
+    }
+    return NULL;
+}
+
+/* Write a raw little-endian register value and read it back. */
+static bool fpga_write_raw(const char *name, uint32_t raw)
+{
+    const FpgaRegister *reg = fpga_register_lookup(name);
+    if (reg == NULL || reg->direction != FPGA_DIR_RW || reg->data_len == 0U || reg->data_len > 4U) {
+        limits_fail(name, "not a settable register");
+        return false;
+    }
+    if (reg->data_len < 4U && raw > ((1UL << (8U * reg->data_len)) - 1UL)) {
+        limits_fail(name, "too large for the register");
+        return false;
+    }
     uint8_t data_buf[4] = {0, 0, 0, 0};
-    if (reg->data_len > 4) {
-        printf("Warning: data_len %u > 4, truncating\r\n", reg->data_len);
-    }
-    for (uint8_t b = 0; b < reg->data_len && b < 4; b++) {
+    for (uint8_t b = 0; b < reg->data_len; b++) {
         data_buf[b] = (uint8_t)((raw >> (8u * b)) & 0xFFu);
     }
-
-    int8_t wret = TCA9548A_Write_Data(reg->muxIdx, reg->channel, reg->i2cAddr,
-                                      reg->offset, reg->data_len, data_buf);
-    if (wret != TCA9548A_OK) {
-        printf("ERROR writing %s to FPGA (ret=%d)\r\n", keybuf, (int)wret);
-    } else {
-        printf("Wrote %s -> raw=0x%08lX (len=%u)\r\n", keybuf, (unsigned long)raw, reg->data_len);
+    const char *why = fpga_write_verify(reg, data_buf);
+    if (why != NULL) {
+        limits_fail(name, why);
+        return false;
     }
     return true;
 }
 
-/* Apply TEC_TRIP temperature setpoint from a parsed JSON value string. */
-static void apply_tec_trip_setting(const char *tmpval)
+/* 1. The safety loads (see above), and the unit's ceilings for the
+ *    operating point. */
+static void apply_safety_loads(void)
 {
-    char *endptr;
-    double TEC_TRIP = strtod(tmpval, &endptr);
+    const safety_ufm_limits_t *ee  = fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_EE);
+    const safety_ufm_limits_t *opt = fpga_attest_ufm_limits((uint8_t)MUX_FPGA_SAFE_OPT);
+    safety_reg_load_t loads[SAFETY_REG_LOADS_MAX];
+    size_t n = safety_reg_loads(ee, opt, loads, SAFETY_REG_LOADS_MAX);
 
-    if (endptr == tmpval) {
-        printf("Invalid TEC_TRIP value: %s\r\n", tmpval);
+    if (ee == NULL || opt == NULL) {
+#if defined(OW_FACTORY_PROGRAMMING)
+        printf("Safety record: EE %s, OPT %s; a device without one keeps its design limits until the stored configuration's safety keys override them (Factory image)\r\n",
+               ee ? "valid" : "none", opt ? "valid" : "none");
+#else
+        printf("Safety record: EE %s, OPT %s; a device without one keeps its design limits and the laser stays interlocked\r\n",
+               ee ? "valid" : "none", opt ? "valid" : "none");
+#endif
+    }
+    motion_cfg_set_unit_ceiling("TA_PULSE_WIDTH", safety_ta_pulse_width_max_us(ee, opt));
+    for (size_t i = 0; i < n; i++) {
+        if (fpga_write_raw(loads[i].reg, loads[i].raw)) {
+            printf("Safety %s -> raw=0x%08lX, verified%s\r\n", loads[i].reg,
+                   (unsigned long)loads[i].raw, loads[i].per_unit ? " (per-unit record)" : "");
+        }
+    }
+}
+
+/* Read a little-endian register of up to 4 bytes through the register map. */
+static bool fpga_read_u32(const char *key, uint32_t *out)
+{
+    const FpgaRegister *reg = fpga_register_lookup(key);
+    uint8_t b[4] = {0, 0, 0, 0};
+
+    if (reg == NULL || reg->data_len > 4U ||
+        TCA9548A_Read_Data(reg->muxIdx, reg->channel, reg->i2cAddr, reg->offset,
+                           reg->data_len, b) != TCA9548A_OK) {
+        return false;
+    }
+    *out = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+    return true;
+}
+
+/* The pulse-width lower limit must not exceed the upper limit. */
+static void check_pulse_width_order(const char *ll_key, const char *ul_key)
+{
+    uint32_t ll = 0U, ul = 0U;
+
+    if (!fpga_read_u32(ll_key, &ll) || !fpga_read_u32(ul_key, &ul)) {
+        limits_fail(ul_key, "read-back failed");
+    } else if (ll > ul) {
+        limits_fail(ll_key, "above the upper limit");
+    }
+}
+
+/* After an apply: report a limits fault to the host and stop a running
+ * trigger. Trigger_Start() refuses while it is set. */
+static void report_limits_state(void)
+{
+    if (!s_limits_fault) {
         return;
     }
+    char m[MQ_MAX_MSG_SIZE];
+    /* Compact so the longest key + reason still fits one queue slot
+     * (MQ_MAX_MSG_SIZE); the first failure is named, the count covers all. */
+    int n = snprintf(m, sizeof(m),
+                     "{\"type\":\"system\",\"state\":\"error\",\"msg\":\"safety limit not applied\",\"key\":\"%.40s\",\"count\":%u}",
+                     s_limits_first_fail, s_limits_fail_count);
+    if (n > 0 && (size_t)n < sizeof(m)) {
+        (void)mq_push(m, (size_t)n);
+    }
+    (void)Trigger_Stop();
+}
 
-    printf("TEC_TRIP found: %.3f\r\n", TEC_TRIP);
+/* TEC thermal trip threshold, from a temperature in degrees C. No logging:
+ * it runs before the UART exists (see safety_envelope_init). */
+static double s_tec_trip_c;
+static void tec_trip_set_c(double trip_c)
+{
+    s_tec_trip_c = trip_c;
+    TEC_TRIP_VALUE = solve_v(temperature_to_resistance(trip_c));
+}
 
-    double r_th = temperature_to_resistance(TEC_TRIP);
-    TEC_TRIP_VALUE = solve_v(r_th);
+/* The compile-time safety parameters, in force from reset: called first
+ * thing in main(), before any peripheral and before the configuration
+ * record is read, so the thermal trip is armed whatever the record holds.
+ * Nothing here may print or touch a peripheral: _write() on the
+ * uninitialised debug UART ends in Error_Handler(). */
+static void safety_envelope_init(void)
+{
+    tec_trip_set_c(SAFETY_TEC_TRIP_C);
+}
 
-    printf("R_TH: %.2f Ohms -> Voltage: %.3f V\r\n", r_th, TEC_TRIP_VALUE);
+/* 2. One operational key of the stored record. */
+static void apply_operational_setting(const cfg_key_rule_t *rule, const char *keybuf, double val)
+{
+    double min = rule->min;
+    double max = motion_cfg_effective_max(rule);   /* lowered by the unit's record (apply_safety_loads) */
+    if (!isfinite(val) || val < min || val > max) {
+        limits_fail(keybuf, "out of range");
+        return;
+    }
+    if (rule->reg == NULL) {
+        return;
+    }
+    uint32_t raw = safety_eng_to_raw(rule->reg, val);
+    if (fpga_write_raw(rule->reg, raw)) {
+        printf("Wrote %s -> raw=0x%08lX, verified\r\n", keybuf, (unsigned long)raw);
+    }
+}
+
+#if defined(OW_FACTORY_PROGRAMMING)
+/* Factory build only: a safety key in the stored record overrides the
+ * firmware value, within the hard bounds, for bench and calibration work.
+ * Applied after the safety loads, so it wins. */
+static void apply_factory_override(const cfg_key_rule_t *rule, const char *keybuf, double val)
+{
+    if (!isfinite(val) || val < rule->min || val > rule->max) {
+        limits_fail(keybuf, "override out of bounds");
+        return;
+    }
+    printf("FACTORY override %s = %.3f\r\n", keybuf, val);
+    if (strcmp(keybuf, "TEC_TRIP") == 0) {
+        tec_trip_set_c(val);
+    } else if (rule->reg != NULL) {
+        (void)fpga_write_raw(rule->reg, safety_eng_to_raw(rule->reg, val));
+    }
+}
+#endif
+
+/* Copy one token's text into dst (NUL-terminated, truncated to fit). */
+static void cfg_copy_token(char *dst, size_t dst_size, const char *json, const jsmntok_t *t)
+{
+    int len = t->end - t->start;
+    int copy_len = (len < (int)dst_size - 1) ? len : (int)dst_size - 1;
+
+    memcpy(dst, json + t->start, (size_t)copy_len);
+    dst[copy_len] = '\0';
+}
+
+/* Apply one "key": value pair of the stored record by its class. */
+static void cfg_apply_pair(const char *json, const jsmntok_t *key, const jsmntok_t *val)
+{
+    char keybuf[40];
+    cfg_copy_token(keybuf, sizeof(keybuf), json, key);
+
+    const cfg_key_rule_t *rule = motion_cfg_key_rule(keybuf);
+    if (rule == NULL) {
+        printf("%s: unknown key in the stored config, ignored\r\n", keybuf);
+        return;
+    }
+    if (rule->cls == CFG_KEY_OPAQUE) {
+        return;
+    }
+    double v = 0.0;
+    bool is_number = motion_cfg_token_number(json, val, &v);
+    if (rule->cls == CFG_KEY_SAFETY) {
+#if defined(OW_FACTORY_PROGRAMMING)
+        if (is_number) {
+            apply_factory_override(rule, keybuf, v);
+        } else {
+            limits_fail(keybuf, "not a number");
+        }
+#else
+        printf("%s: safety parameter in the stored config ignored (firmware-owned)\r\n", keybuf);
+#endif
+        return;
+    }
+    if (!is_number) {
+        limits_fail(keybuf, "not a number");
+        return;
+    }
+    apply_operational_setting(rule, keybuf, v);
 }
 
 void motion_cfg_apply_settings(void)
@@ -315,69 +556,36 @@ void motion_cfg_apply_settings(void)
      * is too large to put on the stack of a boot-path function. This routine is
      * only ever called from the single-threaded main loop / command handler. */
     static jsmntok_t tokens[MOTION_CFG_MAX_JSON_TOKENS];
+    const unsigned int ntok = (unsigned int)(sizeof(tokens) / sizeof(tokens[0]));
 
+    s_limits_fault = false;
+    s_limits_fail_count = 0U;
+    s_limits_first_fail[0] = '\0';
+
+    /* 1. Firmware-owned limits first, whatever the record holds. */
+    printf("TEC_TRIP %.1f C -> %.3f V (compiled in, in force since reset)\r\n", s_tec_trip_c, TEC_TRIP_VALUE);
+    apply_safety_loads();
+
+    /* 2. The operating point from the record. */
     jsmn_init(&parser, NULL);
-    int r = jsmn_parse(&parser, json_str, strlen(json_str), tokens,
-                       sizeof(tokens) / sizeof(tokens[0]), NULL);
-
-    /* Fail LOUDLY on a parse error. A silent failure here leaves TEC_TRIP_VALUE
-     * at 0, which disarms the TEC thermal trip -- a safety interlock -- so it
-     * must be visible both on the serial console and to the host. */
-    if (r < 0) {
-        if (r == JSMN_ERROR_NOMEM) {
-            printf("ERROR: motion config exceeds %u JSON tokens; "
-                   "settings NOT applied (TEC trip NOT armed)\r\n",
-                   (unsigned)(sizeof(tokens) / sizeof(tokens[0])));
-        } else {
-            printf("ERROR: motion config JSON parse failed (jsmn err %d); "
-                   "settings NOT applied (TEC trip NOT armed)\r\n", r);
-        }
-        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"motion config parse failed; settings not applied\"}";
-        (void)mq_push(msg, strlen(msg));
-        return;
-    }
-
+    int r = jsmn_parse(&parser, json_str, strlen(json_str), tokens, ntok, NULL);
     if (r < 1 || tokens[0].type != JSMN_OBJECT) {
-        printf("ERROR: motion config JSON has no root object; "
-               "settings NOT applied (TEC trip NOT armed)\r\n");
-        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"motion config has no root object; settings not applied\"}";
+        printf("ERROR: motion config JSON parse failed (jsmn %d); operating point NOT applied\r\n", r);
+        const char *msg = "{\"type\": \"system\", \"state\": \"error\", \"msg\": \"motion config parse failed; operating point not applied\"}";
         (void)mq_push(msg, strlen(msg));
-        return;
-    }
-
-    for (int i = 1; i < r; i++) {
-        if (tokens[i].type != JSMN_STRING) { continue; }
-
-        int key_start = tokens[i].start;
-        int key_len   = tokens[i].end - tokens[i].start;
-
-        i++;
-        if (i >= r) { break; }
-        if (tokens[i].type != JSMN_PRIMITIVE) { continue; }
-
-        int val_start = tokens[i].start;
-        int val_len   = tokens[i].end - tokens[i].start;
-        char tmpval[64];
-        int copy_len = (val_len < (int)sizeof(tmpval) - 1) ? val_len : (int)sizeof(tmpval) - 1;
-        memcpy(tmpval, json_str + val_start, copy_len);
-        tmpval[copy_len] = '\0';
-
-        char keybuf[64];
-        int key_copy_len = (key_len < (int)sizeof(keybuf) - 1) ? key_len : (int)sizeof(keybuf) - 1;
-        memcpy(keybuf, json_str + key_start, key_copy_len);
-        keybuf[key_copy_len] = '\0';
-
-        const FpgaRegister *reg = fpga_register_lookup(keybuf);
-        if (reg != NULL) {
-            (void)apply_fpga_register_setting(reg, keybuf, tmpval);
-            continue;
-        }
-
-        if (key_len == (int)strlen("TEC_TRIP") &&
-            strncmp(json_str + key_start, "TEC_TRIP", key_len) == 0) {
-            apply_tec_trip_setting(tmpval);
+        s_limits_fault = true;
+    } else {
+        int i = 1;
+        for (int k = 0; k < tokens[0].size && i + 1 < r; k++) {
+            if (tokens[i].type != JSMN_STRING) { break; }
+            cfg_apply_pair(json_str, &tokens[i], &tokens[i + 1]);
+            i = motion_cfg_skip_token(tokens, r, i + 1);
         }
     }
+
+    check_pulse_width_order("EE_PULSE_WIDTH_LL", "EE_PULSE_WIDTH_UL");
+    check_pulse_width_order("OPT_PULSE_WIDTH_LL", "OPT_PULSE_WIDTH_UL");
+    report_limits_state();
 }
 
 /* USER CODE END 0 */
@@ -390,7 +598,10 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  /* The compile-time safety parameters are in force before anything else
+   * runs: the TEC thermal trip threshold no longer depends on the stored
+   * configuration record (safety_envelope.h). */
+  safety_envelope_init();
   /* USER CODE END 1 */
 
   /* MPU Configuration--------------------------------------------------------*/
@@ -438,6 +649,24 @@ int main(void)
   MX_IWDG1_Init();
   /* USER CODE BEGIN 2 */
 
+#if !defined(DEBUG) && !defined(BARE_METAL_BUILD)
+  /* Debug port stays closed (PTR-2026-1-5 CON-02, CVE-1191). The secure bootloader
+   * reconfigures PA13/PA14 (SWDIO/SWCLK) as plain inputs before launching us (DAP
+   * lock). Nothing in this application touches those pins, but assert the state
+   * here too so that a bootloader without the lock, or a future GPIO change, can
+   * never leave the probe interface live on a Release unit. Analog mode: no
+   * input buffer, no pull, lowest leakage. Debug builds keep SWD for development;
+   * bare-metal builds have no bootloader in front of them and are not fielded. */
+  {
+    GPIO_InitTypeDef swd = {0};
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    swd.Pin  = GPIO_PIN_13 | GPIO_PIN_14;
+    swd.Mode = GPIO_MODE_ANALOG;
+    swd.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &swd);
+  }
+#endif
+
   init_dma_logging();
 
   DWT_Init();
@@ -454,13 +683,17 @@ int main(void)
   // HAL_GPIO_WritePin(SYS_EN_GPIO_Port, SYS_EN_Pin, GPIO_PIN_RESET);
 
   printf("\033c");
-  HAL_Delay(250);
+  delay_ms_wdg(250);
   printf("Openwater open-MOTION Console\r\n\r\n");
   printf("FW: %s (%s)\r\nDate: %s\r\n",
        FW_VERSION_STRING,
        FW_SHA_STRING,
        FW_BUILD_TIME_STRING);
   printf("Board Version: 0x%02X\r\n\r\n", BoardV_Read());
+#if defined(OW_FACTORY_PROGRAMMING)
+  printf("*** FACTORY BUILD: FPGA/UFM programming and safety-parameter overrides are ENABLED.\r\n"
+         "*** Manufacturing and RMA bench use only. Not a clinical image.\r\n\r\n");
+#endif
   printf("CPU Clock Frequency: %lu MHz\r\n", HAL_RCC_GetSysClockFreq() / 1000000);
   printf("Initializing, please wait ...\r\n");
 
@@ -475,7 +708,7 @@ int main(void)
   s_xo2_handle.devType       = MachXO2_2000;
   s_xo2_handle.pI2CDrvrCalls = &s_xo2_i2c_handle;
   s_xo2_handle.pfuSecDelay   = delay_us;   /* microsecond delay */
-  s_xo2_handle.pfmSecDelay   = HAL_Delay;   /* millisecond delay */
+  s_xo2_handle.pfmSecDelay   = delay_ms_wdg; /* millisecond delay; keeps the watchdog refreshed */
 
   /* Register the handle with the command interface for page-by-page programming */
   if_cmd_set_xo2_prog_handle(&s_xo2_handle);
@@ -522,6 +755,7 @@ int main(void)
   HAL_GPIO_WritePin(nTRIG_GPIO_Port, nTRIG_Pin, GPIO_PIN_SET); // disable TA Trigger to fpga
 
   trigger_init();
+  watchdog_refresh();
   
   // config trigger timers; zero-init so unassigned fields (e.g.
   // LaserPulseSkipDelayUsec) don't inherit stack garbage — a nonzero skip
@@ -567,6 +801,7 @@ int main(void)
   //I2C_scan(&hi2c4, NULL, 0, true);
   TCA9548A_SelectChannel(0, 0); // seed config i2c
   I2C_scan(&hi2c1, NULL, 0, true);
+  watchdog_refresh();
 #endif
 
   // setup PDU monitor
@@ -613,9 +848,11 @@ int main(void)
    * both muxes and the fan bus. Caches a snapshot the host reads via
    * OW_CTRL_I2C_STATUS. Runs before telemetry/USB so the bus is quiet. */
   console_i2c_health_scan();
+  watchdog_refresh();
 
   // Init USB
   MX_USB_DEVICE_Init();
+  watchdog_refresh();
   // Arm the EFT/EMC watchdog that recovers the OTG_FS link if it hangs.
   usb_recovery_init();
   // Initialize message queue for system JSON messages
@@ -625,6 +862,7 @@ int main(void)
   // Load motion config and apply settings
   motion_cfg_get();
   motion_cfg_apply_settings();
+  watchdog_refresh();
 
   // Initialize odometers
   printf("Initialize odometers\r\n");
@@ -636,14 +874,19 @@ int main(void)
       printf("Serial_Init failed — console serial number unavailable\r\n");
   }
 
-  HAL_Delay(100);
+  delay_ms_wdg(100);
 
   // Enable USB HUB
   HAL_GPIO_WritePin(HUB_RESET_GPIO_Port, HUB_RESET_Pin, GPIO_PIN_SET);
-  HAL_Delay(100);
+  delay_ms_wdg(100);
 
   comms_init();
   pdc_poll_init();
+
+  /* FPGA configuration attestation: runs in the background from the main
+   * loop; the trigger cannot be armed until it passes (fpga_attest.h). */
+  fpga_attest_init(&s_xo2_handle);
+  (void)fpga_attest_start();
   /* Start TIM4 interrupt for telemetry polling (250 ms) */
   HAL_TIM_Base_Start_IT(&htim4);
 
@@ -661,7 +904,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Trigger_Service();  /* host-loss finish work deferred from the USB ISR (CFW-11) */
     comms_process();
+    fpga_attest_service(FPGA_ATTEST_BUDGET_MS);
+    if (fpga_attest_take_reapply_request()) {
+      /* A completed run (re)established the per-unit limits: reload. */
+      motion_cfg_apply_settings();
+    }
     logging_pump();   /* flush USB-printf log data after command responses */
     telemetry_poll();
     usb_recovery_task();
@@ -826,7 +1075,15 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x107075B0;
+  /* 400 kHz fast mode (was 0x107075B0, 100 kHz). I2C1 carries only the mux 0
+   * TCA9548A and the MachXO2 configuration ports (seed, TA, EE, OPT), all
+   * rated for 400 kHz. Kernel clock 60 MHz (PLL3R): PRESC 1, SCLDEL 11,
+   * SDADEL 7, SCLH 27, SCLL 39 -> tLOW 1.33 us, tHIGH 0.93 us, SCL 353-387 kHz
+   * for 50-300 ns rise time; checked against the I2C fast-mode limits.
+   * I2C2 and I2C4 stay at 100 kHz (they also carry the application FPGAs'
+   * fabric I2C slaves, not qualified at 400 kHz). Shortens the configuration
+   * attestation readback (fpga_attest.c). */
+  hi2c1.Init.Timing = 0x10B71B27;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -969,17 +1226,21 @@ static void MX_IWDG1_Init(void)
   /* USER CODE BEGIN IWDG1_Init 1 */
 
   /* USER CODE END IWDG1_Init 1 */
-  /* Timeout = (Reload + 1) * Prescaler / LSI ~= 4096 * 64 / 32000 ~= 8.2 s.
-   * Widened from the original ~0.5 s (Prescaler_4): the device initialisation
-   * between here and the first HAL_IWDG_Refresh() in the main loop (FPGA load,
-   * I2C/SPI device bring-up, the 250 ms console delay) takes far longer than
-   * 0.5 s, so the short window tripped the watchdog before the loop was reached.
-   * Matches the bootloader's IWDG window. If init ever exceeds ~8 s, add
-   * HAL_IWDG_Refresh(&hiwdg1) calls inside the long init steps. */
+  /* Timeout = (Reload + 1) * Prescaler / LSI = 1000 * 8 / 32000 = 250 ms:
+   * 10 frame periods at 40 Hz (CFW-01, ARCH-82). After a fatal fault
+   * Error_Handler() stops the trigger and stops refreshing, so the MCU resets
+   * within this window. Window = 4095 leaves the early-refresh window off.
+   * Everything that blocks longer than the window refreshes it while it
+   * waits: the boot delays and scans (watchdog_refresh(), delay_ms_wdg()),
+   * the user-config flash erase (Flash_Erase) and the XO2 FPGA programming
+   * waits (pfmSecDelay = delay_ms_wdg). Measured on the bench: boot reaches
+   * the main loop about 500 ms after HAL_Init, and the longest main-loop
+   * iteration outside those waits is under 20 ms. The FPGAs are
+   * factory-programmed and are no longer loaded at boot. */
   hiwdg1.Instance = IWDG1;
-  hiwdg1.Init.Prescaler = IWDG_PRESCALER_64;
+  hiwdg1.Init.Prescaler = IWDG_PRESCALER_8;
   hiwdg1.Init.Window = 4095;
-  hiwdg1.Init.Reload = 4095;
+  hiwdg1.Init.Reload = 999;
   if (HAL_IWDG_Init(&hiwdg1) != HAL_OK)
   {
     Error_Handler();
@@ -1949,7 +2210,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_CRC_DeInit(&hcrc);
     
     MX_USB_DEVICE_DeInit();
-    delay_ms(300);
+    /* Let the host see the USB disconnect before the reset. 300 ms is longer
+     * than the 250 ms watchdog window, so refresh it while waiting: the reset
+     * stays a software reset rather than a watchdog one (CFW-01). This runs in
+     * the TIM15 interrupt, so it busy-waits; HAL_IWDG_Refresh is one register
+     * write. */
+    for (uint32_t i = 0U; i < 300U; i++) {
+      delay_ms(1);
+      watchdog_refresh();
+    }
     // Reset the board
     NVIC_SystemReset();
 
@@ -1966,10 +2235,18 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-
+  /* Fatal error (CFW-01, ARCH-82): put the trigger in the safe state, then wait
+   * for the independent watchdog to reset the MCU. Also reached from the
+   * HardFault, MemManage, BusFault and UsageFault handlers. Interrupts are
+   * off, so Trigger_EmergencyStop() writes the timer and GPIO registers
+   * directly. The watchdog is never refreshed here, so the reset follows
+   * within its 250 ms window.
+   * TEC: the TEC DAC sets the ADN8831 temperature setpoint (TEMPSET) and the
+   * MCU has no TEC shutdown control, so writing a DAC code here could command
+   * full drive. The TEC controller is left regulating at its setpoint. */
   __disable_irq();
-  /* Flash blue LED ~500ms on/off to indicate an error state */
+  Trigger_EmergencyStop();
+  /* Flash blue LED ~500ms on/off to indicate an error state until the reset */
   while (1)
   {
     LED_RGB_SET(LED_BLUE);

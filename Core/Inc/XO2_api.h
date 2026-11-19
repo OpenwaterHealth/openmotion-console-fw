@@ -25,11 +25,15 @@
 #define NOT_IMPLEMENTED_ERR   (-1000)
 
 
+/* Openwater local change (Core/Src/LOCAL_CHANGES.md): programming entry
+ * points exist in FACTORY builds only. */
+#if defined(OW_FACTORY_PROGRAMMING)
 int XO2ECA_apiProgram(XO2Handle_t *pXO2dev, const XO2_JEDEC_t *pProgJED, int mode);
 
 int XO2ECA_apiClearXO2(XO2Handle_t *pXO2dev);
 
 int XO2ECA_apiEraseFlash(XO2Handle_t *pXO2dev,  int mode);
+#endif
 
 void XO2ECA_apiJEDECinfo(XO2Handle_t *pXO2dev, const XO2_JEDEC_t *pProgJED);
 
@@ -42,7 +46,9 @@ int XO2ECA_apiReadBackCfg(XO2Handle_t *pXO2dev, unsigned char *pBuf);
 int XO2ECA_apiReadBackUFM(XO2Handle_t *pXO2dev, int startPg, int numPgs, unsigned char *pBuf);
 
 
+#if defined(OW_FACTORY_PROGRAMMING)
 int XO2ECA_apiWriteUFM(XO2Handle_t *pXO2dev, int startPg, int numPgs, unsigned char *pBuf, int erase);
+#endif
 
 int XO2ECA_apiGetHdwStatus(XO2Handle_t *pXO2dev, unsigned int *pVal);
 
