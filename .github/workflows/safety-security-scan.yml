@@ -8,7 +8,7 @@ on:
 
 jobs:
   static-analysis:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: ubuntu-latest (26.04) ships cppcheck 2.19, which stops on the ST __ALIGN_END macro
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
