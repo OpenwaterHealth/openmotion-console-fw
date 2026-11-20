@@ -80,10 +80,6 @@ else()
     set(FW_GIT_SHA "unknown")
 endif()
 
-if(OW_FACTORY_PROGRAMMING)
-    set(FW_GIT_DESCRIBE "${FW_GIT_DESCRIBE}-factory")
-endif()
-
 # A commit can carry more than one release tag: a final release is tagged on
 # the commit of its last release candidate (1.8.2 on 1.8.2-rc.5). git describe
 # may then name the candidate, and the firmware would report the wrong release.
@@ -104,6 +100,10 @@ if(GIT_FOUND AND NOT FW_GIT_DESCRIBE MATCHES "-dirty$")
             endif()
         endforeach()
     endif()
+endif()
+
+if(OW_FACTORY_PROGRAMMING)
+    set(FW_GIT_DESCRIBE "${FW_GIT_DESCRIBE}-factory")
 endif()
 
 string(TIMESTAMP FW_BUILD_TIME_UTC "%Y-%m-%d %H:%M:%S UTC" UTC)
