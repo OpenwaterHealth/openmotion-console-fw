@@ -123,6 +123,13 @@ jobs:
             ghcr.io/openwaterhealth/stm32-build-env:latest \
             bash -lc "git config --global --add safe.directory /workspace && cmake --preset Release && cmake --build build/Release --config Release --target all -j 10"
           test -s "build/Release/${PRODUCT}.bin"
+          # The firmware must report the release it is built for (#version-string).
+          REPORTED="$(sed -n 's/^#define FW_VERSION  "\(.*\)"$/\1/p' build/Release/generated/version.h)"
+          if [ "$REPORTED" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::firmware reports version '$REPORTED', but this build is for tag '$GITHUB_REF_NAME'" >&2
+            exit 1
+          fi
+          echo "Firmware reports: $REPORTED"
 
       # A clinical image must contain no FPGA/UFM programming code: those
       # paths exist only in the Factory preset (PTR-2026-1-5 follow-up).

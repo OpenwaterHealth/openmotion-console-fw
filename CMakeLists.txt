@@ -84,6 +84,28 @@ if(OW_FACTORY_PROGRAMMING)
     set(FW_GIT_DESCRIBE "${FW_GIT_DESCRIBE}-factory")
 endif()
 
+# A commit can carry more than one release tag: a final release is tagged on
+# the commit of its last release candidate (1.8.2 on 1.8.2-rc.5). git describe
+# may then name the candidate, and the firmware would report the wrong release.
+# On a clean checkout, a final X.Y.Z tag on HEAD wins.
+if(GIT_FOUND AND NOT FW_GIT_DESCRIBE MATCHES "-dirty$")
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} tag --points-at HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE FW_HEAD_TAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE FW_HEAD_TAGS_RESULT
+    )
+    if(FW_HEAD_TAGS_RESULT EQUAL 0)
+        string(REPLACE "\n" ";" FW_HEAD_TAGS "${FW_HEAD_TAGS}")
+        foreach(FW_TAG IN LISTS FW_HEAD_TAGS)
+            if(FW_TAG MATCHES "^v?[0-9]+\\.[0-9]+\\.[0-9]+$")
+                set(FW_GIT_DESCRIBE "${FW_TAG}")
+            endif()
+        endforeach()
+    endif()
+endif()
+
 string(TIMESTAMP FW_BUILD_TIME_UTC "%Y-%m-%d %H:%M:%S UTC" UTC)
 
 message(STATUS "FW version   : ${FW_GIT_DESCRIBE}")
