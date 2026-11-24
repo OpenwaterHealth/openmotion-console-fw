@@ -157,8 +157,29 @@ int main(void)
         uint8_t two[2] = { 1, 0 };   /* raw 1: inside every rule's range */
         /* TA_CURRENT_DRV: mux 1 ch 4 addr 0x41 off 0x06, 2 bytes */
         assert(fpga_passthrough_write_problem(1, 4, 0x41, 0x06, 2, v4200, false) == NULL);
+#if defined(OW_FACTORY_PROGRAMMING)
+        /* Factory: pass-through writes are not range-checked (bench use) */
+        assert(fpga_passthrough_write_problem(1, 4, 0x41, 0x06, 2, v5001, false) == NULL);
+        {
+            uint8_t ul_2500us[4] = { 0x85, 0x1E, 0x00, 0x00 };  /* 7813 x 0.32 us, above the 660 us envelope */
+            uint8_t rate_19ms[4] = { 0xEF, 0xE7, 0x00, 0x00 };  /* 59375 x 0.32 us, below the 23125 us floor */
+            uint8_t ta_2150us[3] = { 0x3F, 0x1A, 0x00 };        /* 6719 x 0.32 us, above the 600 us TA bound */
+            assert(fpga_passthrough_write_problem(1, 6, 0x41, 0x04, 4, ul_2500us, false) == NULL); /* EE_PULSE_WIDTH_UL */
+            assert(fpga_passthrough_write_problem(1, 7, 0x41, 0x04, 4, ul_2500us, false) == NULL); /* OPT_PULSE_WIDTH_UL */
+            assert(fpga_passthrough_write_problem(1, 6, 0x41, 0x08, 4, rate_19ms, false) == NULL); /* EE_RATE_LL */
+            assert(fpga_passthrough_write_problem(1, 7, 0x41, 0x08, 4, rate_19ms, false) == NULL); /* OPT_RATE_LL */
+            assert(fpga_passthrough_write_problem(1, 4, 0x41, 0x00, 3, ta_2150us, false) == NULL); /* TA_PULSE_WIDTH */
+            /* the structural checks still apply */
+            assert(fpga_passthrough_write_problem(1, 6, 0x41, 0x04, 2, ul_2500us, false) != NULL);
+        }
+#else
         assert(fpga_passthrough_write_problem(1, 4, 0x41, 0x06, 2, v5001, false) != NULL);
         assert(strcmp(fpga_passthrough_write_problem(1, 4, 0x41, 0x06, 2, v5001, false), "value out of range") == 0);
+        {
+            uint8_t ta_2150us[3] = { 0x3F, 0x1A, 0x00 };
+            assert(strcmp(fpga_passthrough_write_problem(1, 4, 0x41, 0x00, 3, ta_2150us, false), "value out of range") == 0);
+        }
+#endif
         /* TA_CURRENT_LIMIT (0x08) and EE_DRIVE_CL (ch 6, 0x10): firmware-owned */
         const char *w = fpga_passthrough_write_problem(1, 4, 0x41, 0x08, 2, two, false);
         const char *e = fpga_passthrough_write_problem(1, 6, 0x41, 0x10, 2, two, false);
@@ -191,7 +212,11 @@ int main(void)
         assert(strcmp(why, "TA_CURRENT_DRV: out of range") == 0);
         assert(check("{\"TA_PULSE_WIDTH\":500}", false, why) == CFG_CHECK_BAD_VALUE);
         assert(check("{\"TA_CURRENT_DRV\":4100,\"TA_PULSE_WIDTH\":480}", false, why) == CFG_CHECK_OK);
+#if !defined(OW_FACTORY_PROGRAMMING)
         assert(strcmp(fpga_passthrough_write_problem(1, 4, 0x41, 0x06, 2, v4200, false), "value out of range") == 0);
+#else
+        assert(fpga_passthrough_write_problem(1, 4, 0x41, 0x06, 2, v4200, false) == NULL);
+#endif
         /* a ceiling above the envelope bound leaves the bound */
         motion_cfg_set_unit_ceiling("TA_CURRENT_DRV", 9000.0);
         assert(motion_cfg_effective_max(motion_cfg_key_rule("TA_CURRENT_DRV")) == (double)SAFETY_TA_CURRENT_DRV_MAX_MA);
