@@ -137,7 +137,14 @@ static double passthrough_value(const FpgaRegister *r, const uint8_t *data, uint
    (the limits of safety_envelope.h, the driver clamps, the static control
    words: the CFG_KEY_SAFETY and unlisted keys) is refused unless the build is
    a Factory build; an operational register is accepted only within its
-   allow-list range. NULL when allowed. */
+   allow-list range. NULL when allowed.
+
+   A Factory build does not range-check pass-through writes at all: the bench
+   writes the registers itself, outside the WI-00015 envelope and the unit's
+   stored limits (seedless C_min needs a 2.5 ms pulse-width limit, a 19 ms
+   rate limit and a 2.15 ms TA pulse). The stored configuration record and
+   host config writes are still checked against the envelope, and Release and
+   Debug builds are unchanged. */
 static const char *passthrough_ownership_problem(const FpgaRegisterEntry *e,
                                                  const uint8_t *data, uint8_t len)
 {
@@ -147,8 +154,11 @@ static const char *passthrough_ownership_problem(const FpgaRegisterEntry *e,
     if (owned && !motion_cfg_safety_keys_writable()) {
         return "firmware-owned safety register";
     }
+    if (motion_cfg_safety_keys_writable()) {
+        return NULL; /* Factory build: bench writes, no envelope or unit limits */
+    }
     if (rule == NULL || data == NULL) {
-        return NULL; /* Factory build: unlisted writable register, bench use */
+        return NULL;
     }
     double v = passthrough_value(&e->reg, data, len);
     return (v < rule->min || v > motion_cfg_effective_max(rule)) ? "value out of range" : NULL;
